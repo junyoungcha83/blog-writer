@@ -219,7 +219,9 @@ function extractJSON(text) {
 }
 
 // ── 물어보기 팝업 ────────────────────────────
-function askDialog({ icon, title, lines, yes, no }) {
+// yes/no 두 갈래이거나, buttons 로 여러 갈래를 줄 수 있다. 바깥을 누르면 마지막 버튼(취소)로 본다.
+function askDialog({ icon, title, lines, yes, no, buttons }) {
+  const btns = buttons || [{ label: yes, value: true }, { label: no, value: false, ghost: true }];
   return new Promise(resolve => {
     const ov = document.createElement('div');
     ov.className = 'sheet';
@@ -227,15 +229,34 @@ function askDialog({ icon, title, lines, yes, no }) {
       <h2 class="ask-title">${icon} ${esc(title)}</h2>
       ${lines.map(l => `<p class="ask-line">${l}</p>`).join('')}
       <div class="sheet-btns ask-btns">
-        <button class="go" type="button" data-a="1">${esc(yes)}</button>
-        <button class="ghost" type="button" data-a="0">${esc(no)}</button>
+        ${btns.map((b, i) => `<button class="${b.ghost ? 'ghost' : 'go'}" type="button" data-i="${i}">${esc(b.label)}</button>`).join('')}
       </div></div>`;
     document.body.appendChild(ov);
     const done = v => { ov.remove(); resolve(v); };
-    ov.querySelector('[data-a="1"]').onclick = () => done(true);
-    ov.querySelector('[data-a="0"]').onclick = () => done(false);
-    ov.onclick = e => { if (e.target === ov) done(false); };   // 바깥을 누르면 '아니요'
+    btns.forEach((b, i) => { ov.querySelector(`[data-i="${i}"]`).onclick = () => done(b.value); });
+    ov.onclick = e => { if (e.target === ov) done(btns[btns.length - 1].value); };
   });
+}
+
+// 검색범위 밖 자료들 중 가장 최근 발행일과, 그것을 포함할 수 있는 가장 좁은 범위를 찾는다.
+function widenSuggestion(fc, curRange) {
+  const dates = (fc.out_of_range || [])
+    .map(o => o.published_at)
+    .filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d || ''))
+    .sort()
+    .reverse();
+  if (!dates.length) return null;
+  const newest = dates[0];
+  const daysAgo = Math.max(1, Math.round((Date.now() - new Date(newest + 'T00:00:00').getTime()) / 86400000));
+  const curDays = RANGES[curRange].days;
+  const better = Object.entries(RANGES)
+    .filter(([, v]) => v.days > curDays && v.days >= daysAgo)
+    .sort((a, b) => a[1].days - b[1].days)[0];
+  return {
+    newest, daysAgo, count: (fc.out_of_range || []).length,
+    key: better ? better[0] : null,
+    label: better ? better[1].label : null,
+  };
 }
 
 // ── 마크다운 → HTML / 평문 ───────────────────────────────────
@@ -360,7 +381,7 @@ function renderOpts() {
       Object.entries(PURPOSES).map(([k, v]) => [k, v.label]), o.purpose, false),
     row('length', '분량', '본문 글자 수 기준',
       Object.entries(LENGTHS).map(([k, v]) => [k, v.label]), o.length, false),
-    row('range', '검색 범위', '범위 밖 자료는 ②에서 걸러요',
+    row('range', '검색 범위', '속보는 24시간 · 전망·분석은 1개월',
       Object.entries(RANGES).map(([k, v]) => [k, v.label]), o.range, false),
     row('sourceTypes', '출처', '여러 개 선택 · 우선순위로만 반영돼요',
       Object.entries(SOURCE_TYPES), o.sourceTypes, true),
@@ -490,6 +511,7 @@ async function runFrom(startKey) {
   if (running) return;
   const from = STAGES.findIndex(s => s.key === startKey);
   if (from < 0) return;
+  let restartFrom = null;   // '범위를 넓혀 다시' 를 고르면 여기에 단계 키가 들어온다
 
   // 이 단계와 이후 단계 결과를 버린다
   STAGES.slice(from).forEach(st => {
@@ -530,17 +552,39 @@ async function runFrom(startKey) {
       draft.status[st.key] = 'done';
       saveDraft(); renderStages();
 
-      // ② 자료 부족 확인 — 억지로 채우지 않는다
+      // ② 자료 부족 확인 — 억지로 채우지 않는다.
+      // 범위 밖으로 걸러진 자료가 있으면 '언제 자료가 있는지' 알려주고 한 번에 넓혀 다시 돌린다.
       if (st.key === 'factcheck' && data.enough === false) {
         const nFacts = (data.facts || []).length;
-        const go = await askDialog({
-          icon: '🔍', title: '자료가 부족해요',
-          lines: [`검색 범위 안에서 확인된 사실이 <b>${nFacts}개</b>뿐이에요.`,
-                  '이대로 쓰면 내용이 얇거나 근거가 약한 글이 됩니다.',
-                  '검색 범위를 넓히거나 주제를 좁혀서 다시 하는 편이 낫습니다.'],
-          yes: '이대로 계속 쓰기', no: '여기서 멈추기',
-        });
-        if (!go) {
+        const w = widenSuggestion(data, draft.opts.range);
+        const lines = [`검색 범위(<b>${RANGES[draft.opts.range].label}</b>) 안에서 확인된 사실이 <b>${nFacts}개</b>뿐이에요.`];
+        const buttons = [];
+
+        if (w) {
+          lines.push(`범위 밖으로 <b>${w.count}건</b>이 걸러졌고, 그중 가장 최근 자료는 `
+            + `<b>${w.newest}</b> (${w.daysAgo}일 전) 입니다.`);
+          if (w.key) {
+            lines.push(`전망·분석 주제는 하루 안에 새 기사가 없는 게 정상이에요. `
+              + `범위를 <b>${w.label}</b>로 넓히면 걸러진 자료를 쓸 수 있습니다.`);
+            buttons.push({ label: `${w.label}로 넓혀 다시 하기`, value: 'widen' });
+          } else {
+            lines.push('가장 최근 자료도 1개월보다 오래됐어요. 주제를 바꾸는 편이 낫습니다.');
+          }
+        } else {
+          lines.push('이대로 쓰면 내용이 얇거나 근거가 약한 글이 됩니다. 주제를 좁혀서 다시 해 보세요.');
+        }
+        buttons.push({ label: '이대로 계속 쓰기', value: 'go', ghost: !!w && !!w.key });
+        buttons.push({ label: '여기서 멈추기', value: 'stop', ghost: true });
+
+        const choice = await askDialog({ icon: '🔍', title: '자료가 부족해요', lines, buttons });
+
+        if (choice === 'widen') {
+          draft.opts.range = w.key;
+          saveDraft(); renderOpts();
+          restartFrom = 'research';
+          break;
+        }
+        if (choice === 'stop') {
           STAGES.slice(i + 1).forEach(s => { draft.status[s.key] = 'stop'; });
           break;
         }
@@ -558,6 +602,12 @@ async function runFrom(startKey) {
   running = false;
   $('runBtn').disabled = false;
   saveDraft(); renderStages();
+
+  // 검색범위를 넓혀 처음부터 다시 (사용자가 팝업에서 고른 경우)
+  if (restartFrom) {
+    $('runNote').textContent = `검색 범위를 ${RANGES[draft.opts.range].label}로 넓혀 다시 시작합니다.`;
+    return runFrom(restartFrom);
+  }
 
   if (draft.stages.write) {
     if (draft.stages.seo) pushHistory();
@@ -669,6 +719,13 @@ function renderResult() {
       <div class="kv"><span>의견·전망</span><b>${(fc.opinions || []).length}개</b></div>
       <div class="kv"><span>미확인</span><b>${(fc.unverified || []).length}개</b></div>
       <div class="kv"><span>검색범위 밖(제외)</span><b>${oor}개</b></div>
+      ${oor ? `<div class="seo-g"><div class="lbl">범위 밖이라 본문에 못 쓴 자료 (${esc(RANGES[draft.opts.range].label)} 기준)</div>
+        <div class="srcs">${(fc.out_of_range || []).map(o => `
+          <a class="src" href="${esc(o.url || '#')}" target="_blank" rel="noopener noreferrer">
+            <span class="t">${esc(o.title || o.url || '')}</span>
+            <span class="m">${esc(o.published_at || '발행일 미상')} ↗</span>
+          </a>`).join('')}</div>
+        <p class="tiny">이 자료를 쓰려면 검색 범위를 넓혀 다시 실행하세요. 전망·분석 주제는 <b>1개월</b>이 적당합니다.</p></div>` : ''}
       <div class="seo-g"><div class="lbl">요청한 출처 유형 충족</div>
         <div class="taglist">${srcRow.map(s =>
           `<span class="tag" style="color:${s.n ? 'var(--ok)' : 'var(--warn)'}">${esc(s.type)} ${s.n}건</span>`).join('')}</div>

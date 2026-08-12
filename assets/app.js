@@ -1096,34 +1096,52 @@ function renderResult() {
   });
 }
 
-// ── 브리핑 '기사모음' 으로 보내기 ────────────────────────────
-// 같은 브라우저(같은 오리진 github.io)라 localStorage 를 공유한다.
-// 브리핑 앱이 이 키를 읽어 '기사모음' 탭에 표시한다.
+// ── 브리핑 '기사모음' 으로 보내기 (서버 동기화 — 여러 기기 공유) ──
+// 서버: Cloudflare Worker + KV. 비밀번호(토큰)로 보호. 토큰은 같은 오리진이라 브리핑 앱과 공유됨.
+// 로컬 캐시(BRIEFING_KEY)도 같이 남겨 오프라인·같은 브라우저에서 바로 보이게 한다.
 const BRIEFING_KEY = 'briefing-collection-v1';
-function saveToBriefing(btn) {
+const BRIEFING_API = 'https://briefing-collection-api.junyoung-cha83.workers.dev';
+const BRIEFING_TOKEN_KEY = 'briefing-collection-token';
+function _bcReadLocal() { try { const l = JSON.parse(localStorage.getItem(BRIEFING_KEY) || '[]'); return Array.isArray(l) ? l : []; } catch (_) { return []; } }
+function _bcWriteLocal(list) { try { localStorage.setItem(BRIEFING_KEY, JSON.stringify(list.slice(0, 200))); } catch (_) {} }
+async function saveToBriefing(btn) {
   const w = draft.stages.write; if (!w) return;
   const md = buildMarkdown();
   const bodyPlain = mdToPlain(md.replace(/^# .*\n/, '')).trim();
-  const title = chosenTitle();
   const input = draft.input || {};
-  const source_url = (input.mode === 'url' && input.value) ? String(input.value).trim() : '';
-  let list = [];
-  try { list = JSON.parse(localStorage.getItem(BRIEFING_KEY) || '[]'); if (!Array.isArray(list)) list = []; } catch (_) {}
-  list = list.filter(a => a && a.srcId !== draft.id);   // 같은 글은 갱신
-  list.unshift({
+  const article = {
     id: 'bc_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
-    srcId: draft.id,
-    headline: title,
-    preview: bodyPlain.replace(/\s+/g, ' ').slice(0, 120),
-    body: bodyPlain,
-    source: '블로그작성',
-    source_url,
-    date: new Date(draft.at || Date.now()).toISOString().slice(0, 10),
-    savedAt: new Date().toISOString(),
-  });
-  try { localStorage.setItem(BRIEFING_KEY, JSON.stringify(list.slice(0, 200))); }
-  catch (_) { alert('저장 공간이 부족해 브리핑에 저장하지 못했어요.'); return; }
-  if (btn) { const t = btn.textContent; btn.textContent = '브리핑에 저장됨 ✓'; btn.disabled = true; setTimeout(() => { btn.textContent = t; btn.disabled = false; }, 1800); }
+    srcId: draft.id, headline: chosenTitle(),
+    preview: bodyPlain.replace(/\s+/g, ' ').slice(0, 120), body: bodyPlain,
+    source: '블로그작성', source_url: (input.mode === 'url' && input.value) ? String(input.value).trim() : '',
+    date: new Date(draft.at || Date.now()).toISOString().slice(0, 10), savedAt: new Date().toISOString(),
+  };
+  // 1) 로컬 캐시 갱신
+  _bcWriteLocal([article, ..._bcReadLocal().filter(a => a && a.srcId !== draft.id)]);
+  const label = (t) => { if (btn) btn.textContent = t; };
+  const reset = () => { if (btn) setTimeout(() => { label('📌 브리핑에 저장'); btn.disabled = false; }, 2000); };
+  // 2) 서버 동기화 (토큰 필요)
+  let token = localStorage.getItem(BRIEFING_TOKEN_KEY) || '';
+  if (!token) {
+    const v = prompt('브리핑 동기화 비밀번호 (여러 기기 공유용).\n취소하면 이 브라우저에만 저장됩니다.');
+    if (v && v.trim()) { token = v.trim(); localStorage.setItem(BRIEFING_TOKEN_KEY, token); }
+  }
+  if (!token) { label('이 기기에만 저장됨'); if (btn) btn.disabled = true; reset(); return; }
+  label('동기화 중…'); if (btn) btn.disabled = true;
+  try {
+    const res = await fetch(BRIEFING_API + '/api/collection', { headers: { 'X-Edit-Token': token }, cache: 'no-store' });
+    if (res.status === 401) throw new Error('401');
+    let list = []; if (res.ok) { const j = await res.json(); list = Array.isArray(j.items) ? j.items : []; }
+    list = list.filter(a => a && a.srcId !== draft.id); list.unshift(article);
+    const put = await fetch(BRIEFING_API + '/api/collection', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Edit-Token': token }, body: JSON.stringify({ items: list.slice(0, 200) }) });
+    if (put.status === 401) throw new Error('401');
+    if (!put.ok) throw new Error('http ' + put.status);
+    _bcWriteLocal(list);
+    label('브리핑에 저장됨 ✓');
+  } catch (e) {
+    if (String(e.message) === '401') { localStorage.removeItem(BRIEFING_TOKEN_KEY); label('비밀번호 오류'); alert('동기화 비밀번호가 올바르지 않습니다. 이 기기에만 저장했어요.\n다시 누르면 비밀번호를 새로 입력받습니다.'); }
+    else label('오프라인 — 이 기기에만');
+  } finally { reset(); }
 }
 
 // ── 이력 ─────────────────────────────────────────────────────

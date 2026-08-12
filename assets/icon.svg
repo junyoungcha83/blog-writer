@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" role="img" aria-label="블로그작성">
+  <rect width="192" height="192" rx="42" fill="#0f172a"/>
+  <rect x="30" y="38" width="98" height="116" rx="9" fill="#f8fafc"/>
+  <rect x="44" y="56" width="70" height="11" rx="5.5" fill="#0f172a"/>
+  <rect x="44" y="78" width="70" height="7" rx="3.5" fill="#cbd5e1"/>
+  <rect x="44" y="92" width="70" height="7" rx="3.5" fill="#cbd5e1"/>
+  <rect x="44" y="106" width="70" height="7" rx="3.5" fill="#cbd5e1"/>
+  <rect x="44" y="120" width="42" height="7" rx="3.5" fill="#cbd5e1"/>
+  <path d="M104 138 L142 100 L162 120 L124 158 L98 164 Z" fill="#2563eb"/>
+  <path d="M142 100 L152 90 L172 110 L162 120 Z" fill="#93c5fd"/>
+  <path d="M98 164 L104 138 L116 150 Z" fill="#1e40af"/>
+</svg>

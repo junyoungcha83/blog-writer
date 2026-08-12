@@ -1,6 +1,8 @@
 // 블로그작성 — 브라우저에서 Claude API(Messages)를 직접 호출한다.
-// 기사 링크·원문·주제 하나를 입력하면 Researcher → Fact Checker → Writer → SEO 4단계가
-// 순서대로 돌아 블로그 원고와 SEO 세트를 만든다. 단계별 결과는 이 기기에만 저장된다.
+// 기사 링크·원문·주제 하나를 입력하면 Researcher → Fact Checker → Analyst →
+// Visualization → Writer → SEO 6단계가 순서대로 돌아 블로그 원고·그래프·SEO 세트를 만든다.
+// (Visualization 은 Analyst 가 시각자료를 요청하지 않으면 호출 없이 건너뛴다.)
+// 단계별 결과는 이 기기에만 저장된다.
 // API 키도 이 기기(localStorage)에만 저장되고, 요청은 브라우저 → api.anthropic.com 으로 바로 나간다.
 
 const API_URL = 'https://api.anthropic.com/v1/messages';
@@ -319,11 +321,269 @@ function mdToHtml(md) {
     const bq = line.match(/^>\s?(.*)$/);
     if (bq) { flushPara(); flushList(); quote.push(bq[1]); continue; }
 
+    // [[viz:1]] 자리표시자 — 여기에 차트를 그린다
+    const vz = line.match(/^\[\[viz:(\d+)\]\]$/);
+    if (vz) { flushAll(); out.push(` VIZ${Number(vz[1])} `); continue; }
+
     flushList(); flushQuote();
     para.push(line);
   }
   flushAll();
   return out.join('\n');
+}
+
+// 본문 HTML 의 자리표시자를 실제 차트로 교체. 남는 자리표시자·미사용 차트도 처리한다.
+function injectViz(html, vizList) {
+  const used = new Set();
+  let outHtml = html.replace(/ VIZ(\d+) /g, (m, n) => {
+    const i = Number(n) - 1;
+    const v = vizList[i];
+    // Writer 가 없는 번호를 참조한 경우. 내부 토큰을 그대로 보여 주지 않는다.
+    if (!v) return `<div class="viz-warn">${n}번 시각자료가 없어 이 자리를 비웠습니다.</div>`;
+    used.add(i);
+    return renderViz(v, i);
+  });
+  // Writer 가 자리표시자를 빠뜨린 차트는 본문 끝에 붙인다 (그냥 버리지 않는다)
+  const left = vizList.map((v, i) => i).filter(i => !used.has(i));
+  if (left.length) {
+    outHtml += `<div class="viz-left"><div class="viz-left-h">본문에 배치되지 않은 시각자료</div>`
+      + left.map(i => renderViz(vizList[i], i)).join('') + `</div>`;
+  }
+  return outHtml;
+}
+
+// 마크다운/평문 복사용: 자리표시자를 표로 바꾼다
+function resolveVizText(md, vizList) {
+  let s = String(md || '').replace(/^\[\[viz:(\d+)\]\]$/gm, (m, n) => {
+    const v = vizList[Number(n) - 1];
+    return v ? vizToMd(v) : '';
+  });
+  const referenced = new Set((String(md || '').match(/\[\[viz:(\d+)\]\]/g) || [])
+    .map(t => Number(t.replace(/\D/g, ''))));
+  vizList.forEach((v, i) => { if (!referenced.has(i + 1)) s += `\n\n${vizToMd(v)}`; });
+  return s;
+}
+
+// SVG → PNG 저장 (네이버·티스토리는 이미지로 올리는 게 가장 확실하다)
+function savePng(idx) {
+  const fig = document.querySelector(`.viz[data-viz="${idx}"] svg`);
+  if (!fig) return;
+  const title = (currentViz()[idx] || {}).title || 'chart';
+  const xml = new XMLSerializer().serializeToString(fig);
+  const img = new Image();
+  const svgUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+  img.onload = () => {
+    const scale = 2;   // 블로그에 올릴 때 선명하도록 2배
+    const c = document.createElement('canvas');
+    c.width = 640 * scale; c.height = 300 * scale;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(img, 0, 0, c.width, c.height);
+    c.toBlob(b => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b);
+      a.download = title.replace(/[\\/:*?"<>|]/g, '').slice(0, 40) + '.png';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    }, 'image/png');
+  };
+  img.onerror = () => askDialog({ icon: '⚠️', title: 'PNG 저장에 실패했어요',
+    lines: ['이 브라우저에서 변환이 막혔습니다. 그래프를 길게 눌러 이미지로 저장해 보세요.'],
+    yes: '알겠어요', no: '닫기' });
+  img.src = svgUrl;
+}
+
+const currentViz = () => ((draft.stages.visualize || {}).visualizations || []);
+
+// ── 차트 렌더 (SVG 직접 생성 — 외부 라이브러리 없음) ─────────
+// 데이터는 Visualization 단계가 만든 것만 쓴다. 여기서 값을 보정하거나 만들지 않는다.
+
+const VIZ_COLORS = ['#2563eb', '#ea580c', '#16a34a', '#7c3aed', '#0891b2', '#dc2626'];
+const vnum = v => (typeof v === 'number' && isFinite(v) ? v : null);
+
+// 축 라벨용으로 보기 좋은 눈금 만들기
+function niceTicks(min, max, n = 4) {
+  if (min === max) { const p = Math.abs(min) || 1; min -= p * 0.5; max += p * 0.5; }
+  const span = max - min;
+  const raw = span / n;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw) || mag * 10;
+  const lo = Math.floor(min / step) * step;
+  const hi = Math.ceil(max / step) * step;
+  const out = [];
+  for (let v = lo; v <= hi + step * 0.001; v += step) out.push(Math.round(v * 1e6) / 1e6);
+  return out;
+}
+const fmtNum = v => {
+  const a = Math.abs(v);
+  const s = a >= 1000 ? v.toLocaleString('ko-KR')
+    : a >= 100 ? String(Math.round(v))
+    : String(Math.round(v * 100) / 100);
+  return s;
+};
+
+function seriesOf(v) {
+  return (v.series || [])
+    .map(s => ({ label: String(s.label ?? ''), values: (s.values || []).map(vnum) }))
+    .filter(s => s.values.some(x => x !== null));
+}
+
+// 그릴 수 있는 데이터인지 검사. 못 그리면 이유를 돌려준다(조용히 넘기지 않는다).
+function vizProblem(v) {
+  if (!v || !v.type) return '형식을 알 수 없음';
+  if (v.type === 'table') {
+    if (!(v.columns || []).length || !(v.rows || []).length) return '표 내용이 비어 있음';
+    if ((v.rows || []).some(r => (r || []).length !== v.columns.length)) return '표의 열 수가 맞지 않음';
+    return null;
+  }
+  const cats = (v.categories || []).map(String);
+  const ss = seriesOf(v);
+  if (!cats.length || !ss.length) return '데이터가 비어 있음';
+  if (v.type === 'pie') {
+    const vals = ss[0].values.slice(0, cats.length).filter(x => x !== null && x > 0);
+    return vals.length < 2 ? '조각이 2개 미만' : null;
+  }
+  if (cats.length < 3) return '데이터 포인트가 3개 미만';
+  if (ss.some(s => s.values.length !== cats.length)) return '계열 길이가 x축과 다름';
+  return null;
+}
+
+function svgLineBar(v, type) {
+  const W = 640, H = 300, P = { t: 16, r: 16, b: 46, l: 52 };
+  const cats = (v.categories || []).map(String);
+  const ss = seriesOf(v);
+  const flat = ss.flatMap(s => s.values).filter(x => x !== null);
+  const ticks = niceTicks(Math.min(...flat, type === 'bar' ? 0 : Math.min(...flat)), Math.max(...flat));
+  const y0 = ticks[0], y1 = ticks[ticks.length - 1];
+  const iw = W - P.l - P.r, ih = H - P.t - P.b;
+  const sx = i => P.l + (cats.length === 1 ? iw / 2 : (iw * i) / (cats.length - 1));
+  const sy = val => P.t + ih - ((val - y0) / (y1 - y0)) * ih;
+
+  let g = '';
+  // 가로 눈금선 + y 라벨
+  ticks.forEach(t => {
+    const y = sy(t);
+    g += `<line x1="${P.l}" y1="${y.toFixed(1)}" x2="${W - P.r}" y2="${y.toFixed(1)}" stroke="#e5e7eb" stroke-width="1"/>`
+       + `<text x="${P.l - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end" font-size="11" fill="#6b7280">${esc(fmtNum(t))}</text>`;
+  });
+  // x 라벨 (많으면 건너뛰며 표시)
+  const skip = Math.ceil(cats.length / 7);
+  cats.forEach((c, i) => {
+    if (i % skip && i !== cats.length - 1) return;
+    const x = type === 'bar' ? P.l + (iw * (i + 0.5)) / cats.length : sx(i);
+    g += `<text x="${x.toFixed(1)}" y="${H - P.b + 18}" text-anchor="middle" font-size="11" fill="#6b7280">${esc(c)}</text>`;
+  });
+
+  if (type === 'bar') {
+    const bw = iw / cats.length;
+    const inner = Math.min(bw * 0.7, 44);
+    const each = inner / ss.length;
+    ss.forEach((s, si) => s.values.forEach((val, i) => {
+      if (val === null) return;
+      const cx = P.l + bw * i + (bw - inner) / 2 + each * si;
+      const yv = sy(val), yb = sy(Math.max(y0, 0));
+      g += `<rect x="${cx.toFixed(1)}" y="${Math.min(yv, yb).toFixed(1)}" width="${each.toFixed(1)}"
+        height="${Math.max(1, Math.abs(yb - yv)).toFixed(1)}" fill="${VIZ_COLORS[si % 6]}" rx="1"/>`;
+    }));
+  } else {
+    ss.forEach((s, si) => {
+      const pts = s.values.map((val, i) => (val === null ? null : `${sx(i).toFixed(1)},${sy(val).toFixed(1)}`)).filter(Boolean);
+      g += `<polyline points="${pts.join(' ')}" fill="none" stroke="${VIZ_COLORS[si % 6]}" stroke-width="2.5"
+        stroke-linejoin="round" stroke-linecap="round"/>`;
+      s.values.forEach((val, i) => {
+        if (val === null) return;
+        const last = i === s.values.length - 1;
+        g += `<circle cx="${sx(i).toFixed(1)}" cy="${sy(val).toFixed(1)}" r="${last ? 4.5 : 3}"
+          fill="${last ? VIZ_COLORS[si % 6] : '#fff'}" stroke="${VIZ_COLORS[si % 6]}" stroke-width="2"/>`;
+      });
+    });
+  }
+  // 축
+  g += `<line x1="${P.l}" y1="${P.t}" x2="${P.l}" y2="${H - P.b}" stroke="#9ca3af" stroke-width="1"/>`
+     + `<line x1="${P.l}" y1="${H - P.b}" x2="${W - P.r}" y2="${H - P.b}" stroke="#9ca3af" stroke-width="1"/>`;
+
+  return { svg: `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(v.title || '차트')}"
+    xmlns="http://www.w3.org/2000/svg"><rect width="${W}" height="${H}" fill="#fff"/>${g}</svg>`, series: ss };
+}
+
+function svgPie(v) {
+  const W = 640, H = 300, cx = 150, cy = 150, r = 108;
+  const cats = (v.categories || []).map(String);
+  const vals = (seriesOf(v)[0] || { values: [] }).values;
+  const items = cats.map((c, i) => ({ label: c, value: vnum(vals[i]) }))
+    .filter(d => d.value !== null && d.value > 0);
+  const total = items.reduce((s, d) => s + d.value, 0);
+  let a0 = -Math.PI / 2, g = '';
+  items.forEach((d, i) => {
+    const a1 = a0 + (d.value / total) * Math.PI * 2;
+    const big = a1 - a0 > Math.PI ? 1 : 0;
+    const p = (a) => [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+    const [x0, y0] = p(a0), [x1, y1] = p(a1);
+    g += `<path d="M ${cx} ${cy} L ${x0.toFixed(1)} ${y0.toFixed(1)} A ${r} ${r} 0 ${big} 1 ${x1.toFixed(1)} ${y1.toFixed(1)} Z"
+      fill="${VIZ_COLORS[i % 6]}" stroke="#fff" stroke-width="2"/>`;
+    a0 = a1;
+  });
+  // 범례 (오른쪽)
+  items.forEach((d, i) => {
+    const ly = 46 + i * 26;
+    const pct = ((d.value / total) * 100).toFixed(1);
+    g += `<rect x="300" y="${ly - 10}" width="12" height="12" rx="2" fill="${VIZ_COLORS[i % 6]}"/>`
+       + `<text x="320" y="${ly}" font-size="13" fill="#1f2937">${esc(d.label)}</text>`
+       + `<text x="${W - 16}" y="${ly}" text-anchor="end" font-size="13" fill="#6b7280">`
+       + `${esc(fmtNum(d.value))}${esc(v.unit || '')} (${pct}%)</text>`;
+  });
+  return { svg: `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(v.title || '차트')}"
+    xmlns="http://www.w3.org/2000/svg"><rect width="${W}" height="${H}" fill="#fff"/>${g}</svg>`, series: [] };
+}
+
+// 차트 하나를 완성된 figure 로. 못 그리면 이유를 표시한다.
+function renderViz(v, idx) {
+  const bad = vizProblem(v);
+  const cap = `<figcaption class="viz-cap">
+      <b>${esc(v.title || '')}</b>
+      ${v.unit ? `<span class="viz-unit">단위: ${esc(v.unit)}</span>` : ''}
+      ${v.note ? `<span class="viz-note">${esc(v.note)}</span>` : ''}
+      ${v.source ? `<span class="viz-src">출처: ${v.source_url
+        ? `<a href="${esc(v.source_url)}" target="_blank" rel="noopener noreferrer">${esc(v.source)}</a>`
+        : esc(v.source)}</span>` : ''}
+    </figcaption>`;
+
+  if (bad) {
+    return `<figure class="viz viz-bad" data-viz="${idx}">
+      <div class="viz-warn">이 그래프는 그리지 않았습니다 — ${esc(bad)}</div>${cap}</figure>`;
+  }
+  if (v.type === 'table') {
+    return `<figure class="viz" data-viz="${idx}"><div class="md-table"><table>
+      <thead><tr>${v.columns.map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead>
+      <tbody>${v.rows.map(r => `<tr>${r.map(c => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody>
+      </table></div>${cap}</figure>`;
+  }
+  const out = v.type === 'pie' ? svgPie(v) : svgLineBar(v, v.type === 'bar' ? 'bar' : 'line');
+  const legend = (v.type !== 'pie' && out.series.length > 1)
+    ? `<div class="viz-legend">${out.series.map((s, i) =>
+        `<span><i style="background:${VIZ_COLORS[i % 6]}"></i>${esc(s.label)}</span>`).join('')}</div>`
+    : '';
+  return `<figure class="viz" data-viz="${idx}">${legend}
+    <div class="viz-svg">${out.svg}</div>${cap}
+    <div class="viz-btns"><button class="mini" type="button" data-png="${idx}">PNG 저장</button></div></figure>`;
+}
+
+// 차트를 마크다운·평문으로 옮길 때 쓰는 표 (블로그 에디터는 SVG 를 못 받는 경우가 많다)
+function vizToMd(v) {
+  const head = `**${v.title || '표'}**${v.unit ? ` (단위: ${v.unit})` : ''}`;
+  const foot = [v.note, v.source ? `출처: ${v.source}${v.source_url ? ` ${v.source_url}` : ''}` : '']
+    .filter(Boolean).join(' · ');
+  let body;
+  if (v.type === 'table') {
+    body = [`| ${v.columns.join(' | ')} |`, `|${v.columns.map(() => '---').join('|')}|`,
+      ...v.rows.map(r => `| ${r.join(' | ')} |`)].join('\n');
+  } else {
+    const cats = (v.categories || []).map(String);
+    const ss = seriesOf(v);
+    body = [`| 구분 | ${cats.join(' | ')} |`, `|${['---', ...cats.map(() => '---')].join('|')}|`,
+      ...ss.map(s => `| ${s.label} | ${s.values.map(x => (x === null ? '-' : fmtNum(x))).join(' | ')} |`)].join('\n');
+  }
+  return [head, '', body, foot ? `\n${foot}` : ''].join('\n');
 }
 
 // 네이버·티스토리 에디터에 붙여넣기 좋은 평문
@@ -435,7 +695,7 @@ function renderStages() {
   box.className = 'stages';
   box.innerHTML = STAGES.map(st => {
     const s = draft.status[st.key] || 'wait';
-    const label = { wait: '대기', run: '진행 중', done: '완료', fail: '실패', stop: '중단' }[s];
+    const label = { wait: '대기', run: '진행 중', done: '완료', fail: '실패', stop: '중단', skip: '생략' }[s];
     const data = draft.stages[st.key];
     return `<div class="stage ${s}" data-k="${st.key}">
       <div class="stage-h">
@@ -446,6 +706,8 @@ function renderStages() {
       ${s === 'fail' ? `<div class="stage-body"><b>${esc(draft.err[st.key]?.title || '오류')}</b>
         <div class="tiny">${esc(draft.err[st.key]?.detail || '')}</div>
         <div style="margin-top:9px"><button class="mini" data-re="${st.key}">이 단계부터 다시</button></div></div>` : ''}
+      ${s === 'skip' ? `<div class="stage-body"><div class="tiny">${esc(draft.err[st.key]?.detail || '건너뜀')}
+        — 요금이 나가지 않았습니다.</div></div>` : ''}
       ${s === 'done' && data ? `<div class="stage-body">
         <button class="mini" data-re="${st.key}">이 단계부터 다시</button>
         <button class="mini" data-json="${st.key}">원문 JSON</button>
@@ -531,10 +793,20 @@ async function runFrom(startKey) {
 
   for (let i = from; i < STAGES.length; i++) {
     const st = STAGES[i];
+    const ctx = { input: draft.input, opts: draft.opts, stages: draft.stages };
+
+    // 필요 없는 단계는 호출하지 않는다 (예: 요청된 시각자료가 없으면 Visualization 생략)
+    if (st.skipIf && st.skipIf(ctx)) {
+      draft.stages[st.key] = st.skipResult || {};
+      draft.status[st.key] = 'skip';
+      draft.err[st.key] = { title: '', detail: st.skipNote || '건너뜀' };
+      saveDraft(); renderStages();
+      continue;
+    }
+
     draft.status[st.key] = 'run';
     renderStages();
 
-    const ctx = { input: draft.input, opts: draft.opts, stages: draft.stages };
     const maxTokens = typeof st.maxTokens === 'function' ? st.maxTokens(ctx) : st.maxTokens;
     const model = (st.key === 'write' && opusWriter()) ? 'claude-opus-5' : getModel();
 
@@ -628,7 +900,9 @@ function chosenTitle() {
 
 function buildMarkdown() {
   const w = draft.stages.write || {};
-  const parts = [`# ${chosenTitle()}`, '', (w.body_md || '').trim()];
+  // 차트 자리표시자는 마크다운으로 옮길 수 없으니 데이터 표로 바꾼다
+  const body = resolveVizText((w.body_md || '').trim(), currentViz());
+  const parts = [`# ${chosenTitle()}`, '', body];
   if ((w.footnotes || []).length) {
     parts.push('', '## 출처', '');
     w.footnotes.forEach(f => parts.push(`[${f.n}] ${f.outlet ? f.outlet + ' — ' : ''}${f.title || ''} ${f.url || ''}`.trim()));
@@ -682,8 +956,11 @@ function renderResult() {
   }
   const fc = draft.stages.factcheck || {};
   const seo = draft.stages.seo;
+  const an = draft.stages.analyst;
+  const viz = currentViz();
+  const skipped = ((draft.stages.visualize || {}).skipped || []);
   const md = buildMarkdown();
-  const html = mdToHtml(w.body_md || '');
+  const html = injectViz(mdToHtml(w.body_md || ''), viz);
 
   const srcRow = sourceStatus();
   const oor = (fc.out_of_range || []).length;
@@ -709,7 +986,28 @@ function renderResult() {
       <div class="md">${html}</div>
       ${w.disclaimer ? `<div class="disclaimer">${esc(w.disclaimer)}</div>` : ''}
       ${aiNotice() ? `<div class="disclaimer">이 글은 AI의 도움을 받아 작성했으며, 사람이 사실관계를 검토했습니다.</div>` : ''}
+      ${viz.length ? `<p class="tiny">그래프는 <b>PNG 저장</b>으로 내려서 블로그에 이미지로 올리는 게 가장 확실합니다.
+        마크다운·평문 복사에는 그래프가 <b>데이터 표</b>로 바뀌어 들어갑니다.</p>` : ''}
     </div>
+
+    ${an ? `<div class="sec s-an">
+      <h3>🧭 분석 (Analyst)</h3>
+      ${(an.key_points || []).length ? `<div class="seo-g"><div class="lbl">핵심 정리</div>
+        <ul class="bul" style="padding-left:18px;font-size:.9rem">${an.key_points.map(k => `<li>${esc(k)}</li>`).join('')}</ul></div>` : ''}
+      ${(an.different_views || []).length ? `<div class="seo-g"><div class="lbl">엇갈리는 관점</div>
+        ${an.different_views.map(d => `<div style="margin-bottom:8px"><b style="font-size:.88rem">${esc(d.topic || '')}</b>
+          <ul class="bul" style="padding-left:18px;font-size:.88rem">${(d.views || []).map(v => `<li>${esc(v)}</li>`).join('')}</ul></div>`).join('')}</div>` : ''}
+      ${(an.risks || []).length ? `<div class="seo-g"><div class="lbl">주의할 점</div>
+        <ul class="bul" style="padding-left:18px;font-size:.9rem">${an.risks.map(k => `<li>${esc(k)}</li>`).join('')}</ul></div>` : ''}
+      ${(an.possible_outlook || []).length ? `<div class="seo-g"><div class="lbl">전망 (발언 주체 표기)</div>
+        <ul class="bul" style="padding-left:18px;font-size:.9rem">${an.possible_outlook.map(o =>
+          `<li><b>${esc(o.who || '출처 불명')}</b> — ${esc(o.view || '')}</li>`).join('')}</ul></div>` : ''}
+      ${skipped.length ? `<div class="seo-g"><div class="lbl">만들지 않은 시각자료</div>
+        <ul class="bul tiny" style="padding-left:18px">${skipped.map(s =>
+          `<li><b>${esc(s.title || '')}</b> — ${esc(s.reason || '')}</li>`).join('')}</ul>
+        <p class="tiny">데이터가 부족하거나 오해를 줄 수 있어 일부러 만들지 않은 항목입니다.</p></div>` : ''}
+      ${draft.status.visualize === 'skip' ? `<p class="tiny">이 글은 시각화할 만한 수치가 없어 그래프 단계를 건너뛰었습니다(요금 미발생).</p>` : ''}
+    </div>` : ''}
 
     <div class="sec s-src">
       <h3>🔍 근거 현황</h3>
@@ -775,7 +1073,8 @@ function renderResult() {
       const k = b.dataset.copy;
       const text =
         k === 'md' ? md :
-        k === 'html' ? `<h1>${esc(chosenTitle())}</h1>\n` + mdToHtml(w.body_md || '') :
+        k === 'html' ? `<h1>${esc(chosenTitle())}</h1>\n` + injectViz(mdToHtml(w.body_md || ''), viz)
+          .replace(/<div class="viz-btns">[\s\S]*?<\/div>/g, '') :   // 복사본에 버튼은 넣지 않는다
         k === 'plain' ? chosenTitle() + '\n\n' + mdToPlain(md.replace(/^# .*\n/, '')) :
         k === 'seotitles' ? (seo.seo_titles || []).join('\n') :
         k === 'meta' ? (seo.meta_description || '') :
@@ -789,6 +1088,9 @@ function renderResult() {
     const safe = chosenTitle().replace(/[\\/:*?"<>|]/g, '').slice(0, 40) || 'post';
     download(`${new Date(draft.at).toISOString().slice(0, 10)}-${safe}.md`, md);
   };
+  box.querySelectorAll('[data-png]').forEach(b => {
+    b.onclick = () => savePng(Number(b.dataset.png));
+  });
 }
 
 // ── 이력 ─────────────────────────────────────────────────────

@@ -207,15 +207,45 @@ body {
 }
 .md a { color: var(--link); }
 .md hr { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
+/* 표 스타일은 .md-table 기준 — 본문 안의 표와 차트 figure 안의 표에 모두 적용된다
+   (.md 하위로 걸면 figure 안의 표에 테두리가 안 붙는다) */
 .md-table { overflow-x: auto; margin: 0 0 10px; }
-.md table { border-collapse: collapse; font-size: .88rem; min-width: 100%; }
-.md th, .md td { border: 1px solid var(--border); padding: 6px 9px; text-align: left; }
-.md th { background: var(--bg); font-weight: 800; }
+.md-table table { border-collapse: collapse; font-size: .88rem; min-width: 100%; }
+.md-table th, .md-table td { border: 1px solid var(--border); padding: 6px 9px; text-align: left; }
+.md-table th { background: var(--bg); font-weight: 800; white-space: nowrap; }
+.md-table td { font-variant-numeric: tabular-nums; }
 
 .disclaimer {
   margin-top: 14px; padding: 10px 12px; border-radius: 10px;
   background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412; font-size: .82rem;
 }
+
+/* 차트·표 (Visualization 단계 산출물) */
+.viz {
+  margin: 16px 0; padding: 12px 12px 10px;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--card);
+}
+.viz-svg { overflow-x: auto; }
+.viz-svg svg { display: block; min-width: 320px; }
+.viz-legend {
+  display: flex; flex-wrap: wrap; gap: 4px 14px; margin-bottom: 8px;
+  font-size: .8rem; color: var(--muted);
+}
+.viz-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.viz-legend i { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
+.viz-cap { margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
+.viz-cap b { font-size: .88rem; }
+.viz-unit, .viz-note, .viz-src { font-size: .76rem; color: var(--muted); }
+.viz-src a { color: var(--link); }
+.viz-btns { margin-top: 9px; }
+.viz-warn {
+  font-size: .82rem; color: #9a3412; background: #fff7ed;
+  border: 1px solid #fed7aa; border-radius: 8px; padding: 9px 11px;
+}
+.viz-bad { border-color: #fed7aa; }
+.viz-left { margin-top: 18px; border-top: 1px dashed var(--border); padding-top: 12px; }
+.viz-left-h { font-size: .8rem; font-weight: 800; color: var(--muted); margin-bottom: 6px; }
+.sec.s-an { border-left-color: #0891b2 } .sec.s-an > h3 { color: #0891b2 }
 
 /* SEO 패널 */
 .kv {

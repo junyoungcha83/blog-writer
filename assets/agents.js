@@ -203,7 +203,117 @@ ${JSON.stringify(research, null, 2)}
 위 자료를 대조해 검증해라. JSON 만 출력.`;
 }
 
-// ── ③ Writer ─────────────────────────────────────────────────
+// ── ③ Analyst ────────────────────────────────────────────────
+
+function analystSystem(opts) {
+  const purpose = PURPOSES[opts.purpose];
+  return `${COMMON_RULES}
+
+너의 역할: Analyst. 검증된 사실로 글의 논리를 세우고, 시각자료가 필요한지 판단한다. 새로 검색하지 않는다.
+
+${fieldBlock(opts)}
+글의 목적: ${purpose.label} — ${purpose.guide}
+
+분석 원칙:
+- facts 에 있는 것만 근거로 쓴다. 없는 수치를 만들지 않는다.
+- 원인을 쓸 때는 자료가 실제로 인과를 말한 경우에만 쓴다. 상관을 인과로 바꾸지 않는다.
+- 서로 다른 관점(disputed)은 어느 쪽이 맞다고 정하지 말고 양쪽을 정리한다.
+- 전망(possible_outlook)은 반드시 "누구의 전망인지" 밝히고, 네가 만든 전망은 넣지 않는다.
+- 독자가 이 글을 읽고 무엇을 알게 되는지를 recommended_structure 로 설계한다.
+
+시각자료 판단 (중요):
+- **모든 글에 억지로 그래프를 넣지 않는다.** 시각화했을 때 독자의 이해가 실제로 좋아지는 경우에만 요청한다.
+- 요청하려면 facts 안에 **같은 기준으로 비교 가능한 수치가 3개 이상** 있어야 한다.
+  (예: 시점이 다른 같은 지표 3개 이상, 또는 지역이 다른 같은 지표 3개 이상)
+- 수치가 2개 이하거나 단위·기준시점이 서로 다르면 **요청하지 않는다.** 빈 배열로 둔다.
+- 유형 선택: 시간에 따른 변화 → line / 항목 간 비교 → bar / 구성비 → pie / 그 외 표로 충분 → table
+- 각 요청에는 근거가 된 facts 의 claim 을 fact_refs 에 적는다.
+
+출력 JSON 스키마:
+{
+  "key_points": ["독자가 가져갈 핵심 3~5개"],
+  "analysis": [ { "point": "분석 항목", "detail": "근거를 들어 설명", "based_on": ["facts 의 claim"] } ],
+  "different_views": [ { "topic": "쟁점", "views": ["A 입장", "B 입장"] } ],
+  "risks": ["주의할 점·불확실성"],
+  "implications": ["이 사안이 독자에게 갖는 의미"],
+  "possible_outlook": [ { "who": "전망 주체", "view": "전망 내용" } ],
+  "recommended_structure": ["소제목 순서 제안"],
+  "visualization_requests": [
+    { "type": "line|bar|pie|table", "title": "제목", "reason": "왜 필요한가", "fact_refs": ["근거 claim"] }
+  ]
+}
+
+visualization_requests 는 **비워 두는 것이 기본값**이다. 위 조건을 확실히 만족할 때만 채운다.`;
+}
+
+function analystUser(fc, opts) {
+  return `검증된 자료:
+${JSON.stringify(fc, null, 2)}
+
+위 자료로 논리를 세우고 시각자료 필요 여부를 판단해라. JSON 만 출력.`;
+}
+
+// ── ④ Visualization ──────────────────────────────────────────
+
+function visualizationSystem(opts) {
+  return `${COMMON_RULES}
+
+너의 역할: Visualization. Analyst 가 요청한 표·그래프의 데이터를 만든다. 새로 검색하지 않는다.
+
+절대 지켜야 할 것:
+- **Researcher/Fact Checker 가 확인한 수치만 쓴다.** 숫자를 하나라도 만들어 내면 안 된다.
+- 보간·추정·반올림으로 없는 값을 채우지 않는다. 빠진 구간은 그냥 빼거나 그 차트를 만들지 않는다.
+- 데이터 포인트가 3개 미만이면 그 차트를 만들지 않는다.
+- 단위나 기준시점이 섞여 있으면 만들지 않는다.
+- 오해를 유발할 수 있으면(예: 축을 잘라야 차이가 보이는 경우) 만들지 않는다.
+- 만들지 않기로 했으면 skipped 에 이유를 적는다. **빈 배열을 돌려주는 것이 정상적인 결과다.**
+- 모든 항목에 출처와 URL 을 적는다.
+
+데이터 형식:
+- line / bar: categories 가 x축 라벨, series 가 계열. 각 series.values 길이는 categories 와 같아야 한다.
+- pie: categories 가 조각 이름, series 는 1개만. values 합이 100 이 아니어도 된다.
+- table: columns 와 rows 를 쓴다. rows 의 각 행 길이는 columns 와 같아야 한다.
+
+출력 JSON 스키마:
+{
+  "visualizations": [
+    {
+      "type": "line|bar|pie",
+      "title": "차트 제목",
+      "unit": "% 또는 만원 또는 건 등",
+      "categories": ["7월 1주", "7월 2주", "7월 3주"],
+      "series": [ { "label": "서울", "values": [0.1, 0.2, 0.3] } ],
+      "source": "매체·기관명",
+      "source_url": "url",
+      "note": "기준시점 등 짧은 설명",
+      "fact_refs": ["근거가 된 facts 의 claim"]
+    },
+    {
+      "type": "table",
+      "title": "표 제목",
+      "columns": ["지역", "변동률"],
+      "rows": [["서울", "0.3%"], ["경기", "0.1%"]],
+      "source": "매체·기관명",
+      "source_url": "url",
+      "note": "",
+      "fact_refs": []
+    }
+  ],
+  "skipped": [ { "title": "만들지 않은 요청", "reason": "이유" } ]
+}`;
+}
+
+function visualizationUser(ctx) {
+  return `Analyst 의 시각자료 요청:
+${JSON.stringify(ctx.stages.analyst.visualization_requests || [], null, 2)}
+
+쓸 수 있는 검증된 수치(facts):
+${JSON.stringify((ctx.stages.factcheck || {}).facts || [], null, 2)}
+
+이 수치만 써서 데이터를 만들어라. 조건을 만족하지 못하면 만들지 말고 skipped 에 적어라. JSON 만 출력.`;
+}
+
+// ── ⑤ Writer ─────────────────────────────────────────────────
 
 function writerSystem(opts) {
   const len = LENGTHS[opts.length];
@@ -225,10 +335,18 @@ ${fieldBlock(opts)}
 - 근거가 되는 문장 끝에 [1] [2] 형태로 각주 번호를 단다. 번호는 footnotes 배열의 순서와 정확히 일치해야 한다.
 - 쟁점(disputed)은 한쪽으로 정리하지 말고 양쪽을 나란히 소개한다.
 - 전망·의견(opinions)을 쓸 때는 "누가 그렇게 본다"는 형태로만 쓴다. 네 의견처럼 쓰면 안 된다.
+- Analyst 의 recommended_structure 를 소제목 순서의 출발점으로 쓴다. 더 나은 순서가 있으면 바꿔도 된다.
+- Analyst 의 key_points·analysis·different_views·risks·implications 를 본문에 녹인다.
+  다만 각 항목을 그대로 나열하지 말고 문단으로 풀어 쓴다.
 - 원문 저작권: 원문 문장을 그대로 옮기는 것은 문단당 최대 2문장까지, 인용부호와 출처를 함께 표시한다. 그 외에는 전부 네 문장으로 다시 쓴다. 원문 문단을 통째로 복사하는 것은 금지다.
 - 핵심 수치·변화·원인·쟁점을 정리하는 분석 섹션을 본문에 하나 포함한다. 다만 근거 없는 인과관계를 만들지 않는다.
 - 마크다운으로 쓴다. 소제목은 ##, 필요하면 표와 목록을 쓴다. 문단은 빈 줄로 구분한다.
 - 자료가 부족한 주제라면 ${len.chars}자를 억지로 채우지 말고 짧게 끝낸다.
+- **시각자료 배치**: 주어진 visualizations 가 있으면, 그 내용을 설명하는 문단 <b>바로 뒤</b>에
+  \`[[viz:1]]\` \`[[viz:2]]\` 처럼 자리표시자를 한 줄로 넣는다(번호는 1부터, 배열 순서와 일치).
+  자리표시자는 반드시 빈 줄로 둘러싼 독립된 줄에 둔다. 앱이 이 자리에 실제 그래프를 그린다.
+  차트가 말하는 내용을 본문에서 한 문장으로 짚어 준다("표에서 보듯" 같은 빈말은 쓰지 않는다).
+  visualizations 가 비어 있으면 자리표시자를 넣지 않는다. 없는 번호를 쓰면 안 된다.
 ${risky
   ? '- disclaimer 에 투자 판단 책임 고지문을 한두 문장으로 넣는다(이 글은 정보 제공 목적이며 투자 판단과 그 결과는 독자 본인에게 있다는 취지).'
   : '- disclaimer 는 빈 문자열로 둔다.'}
@@ -246,9 +364,16 @@ ${risky
 char_count 는 body_md 의 공백 포함 글자 수를 직접 세어 적는다.`;
 }
 
-function writerUser(fc, opts) {
-  return `검증된 자료:
-${JSON.stringify(fc, null, 2)}
+function writerUser(ctx) {
+  const viz = (ctx.stages.visualize || {}).visualizations || [];
+  return `검증된 자료(facts·쟁점·의견):
+${JSON.stringify(ctx.stages.factcheck, null, 2)}
+
+분석 결과:
+${JSON.stringify(ctx.stages.analyst, null, 2)}
+
+본문에 넣을 시각자료 ${viz.length}개${viz.length ? ' — 순서대로 [[viz:1]] … 로 참조' : ' (없음 — 자리표시자 넣지 말 것)'}:
+${JSON.stringify(viz.map((v, i) => ({ n: i + 1, type: v.type, title: v.title, unit: v.unit, note: v.note })), null, 2)}
 
 위 자료만 써서 원고를 작성해라. JSON 만 출력.`;
 }
@@ -314,14 +439,32 @@ const STAGES = [
     user: (ctx) => factCheckerUser(ctx.stages.research, ctx.input, ctx.opts),
   },
   {
-    key: 'write', no: '③', label: 'Writer', desc: '제목·목차·본문 작성',
+    key: 'analyst', no: '③', label: 'Analyst', desc: '논리 구성 → 시각자료 필요 판단',
+    effort: 'medium', maxTokens: 12000,
+    tools: () => 'none',
+    system: (ctx) => analystSystem(ctx.opts),
+    user: (ctx) => analystUser(ctx.stages.factcheck, ctx.opts),
+  },
+  {
+    key: 'visualize', no: '④', label: 'Visualization', desc: '표·그래프 데이터 생성',
+    effort: 'low', maxTokens: 10000,
+    tools: () => 'none',
+    // Analyst 가 시각자료를 요청하지 않았으면 호출 자체를 건너뛴다 (요금 절약)
+    skipIf: (ctx) => !((ctx.stages.analyst || {}).visualization_requests || []).length,
+    skipResult: { visualizations: [], skipped: [] },
+    skipNote: '요청된 시각자료 없음',
+    system: (ctx) => visualizationSystem(ctx.opts),
+    user: (ctx) => visualizationUser(ctx),
+  },
+  {
+    key: 'write', no: '⑤', label: 'Writer', desc: '제목·목차·본문 작성',
     effort: 'medium', maxTokens: (ctx) => LENGTHS[ctx.opts.length].maxTokens,
     tools: () => 'none',
     system: (ctx) => writerSystem(ctx.opts),
-    user: (ctx) => writerUser(ctx.stages.factcheck, ctx.opts),
+    user: (ctx) => writerUser(ctx),
   },
   {
-    key: 'seo', no: '④', label: 'SEO', desc: '제목·키워드·FAQ·썸네일 문구',
+    key: 'seo', no: '⑥', label: 'SEO', desc: '제목·키워드·FAQ·썸네일 문구',
     effort: 'low', maxTokens: 8000,
     tools: () => 'none',
     system: (ctx) => seoSystem(ctx.opts),

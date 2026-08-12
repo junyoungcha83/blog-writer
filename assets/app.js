@@ -982,6 +982,7 @@ function renderResult() {
         <button class="mini" data-copy="html">HTML 복사</button>
         <button class="mini" data-copy="plain">평문 복사</button>
         <button class="mini" data-dl="1">.md 저장</button>
+        <button class="mini" data-briefing="1" title="브리핑 앱의 '기사모음' 탭에 저장(같은 브라우저)">📌 브리핑에 저장</button>
       </div>
       <div class="md">${html}</div>
       ${w.disclaimer ? `<div class="disclaimer">${esc(w.disclaimer)}</div>` : ''}
@@ -1088,9 +1089,41 @@ function renderResult() {
     const safe = chosenTitle().replace(/[\\/:*?"<>|]/g, '').slice(0, 40) || 'post';
     download(`${new Date(draft.at).toISOString().slice(0, 10)}-${safe}.md`, md);
   };
+  const bf = box.querySelector('[data-briefing]');
+  if (bf) bf.onclick = () => saveToBriefing(bf);
   box.querySelectorAll('[data-png]').forEach(b => {
     b.onclick = () => savePng(Number(b.dataset.png));
   });
+}
+
+// ── 브리핑 '기사모음' 으로 보내기 ────────────────────────────
+// 같은 브라우저(같은 오리진 github.io)라 localStorage 를 공유한다.
+// 브리핑 앱이 이 키를 읽어 '기사모음' 탭에 표시한다.
+const BRIEFING_KEY = 'briefing-collection-v1';
+function saveToBriefing(btn) {
+  const w = draft.stages.write; if (!w) return;
+  const md = buildMarkdown();
+  const bodyPlain = mdToPlain(md.replace(/^# .*\n/, '')).trim();
+  const title = chosenTitle();
+  const input = draft.input || {};
+  const source_url = (input.mode === 'url' && input.value) ? String(input.value).trim() : '';
+  let list = [];
+  try { list = JSON.parse(localStorage.getItem(BRIEFING_KEY) || '[]'); if (!Array.isArray(list)) list = []; } catch (_) {}
+  list = list.filter(a => a && a.srcId !== draft.id);   // 같은 글은 갱신
+  list.unshift({
+    id: 'bc_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+    srcId: draft.id,
+    headline: title,
+    preview: bodyPlain.replace(/\s+/g, ' ').slice(0, 120),
+    body: bodyPlain,
+    source: '블로그작성',
+    source_url,
+    date: new Date(draft.at || Date.now()).toISOString().slice(0, 10),
+    savedAt: new Date().toISOString(),
+  });
+  try { localStorage.setItem(BRIEFING_KEY, JSON.stringify(list.slice(0, 200))); }
+  catch (_) { alert('저장 공간이 부족해 브리핑에 저장하지 못했어요.'); return; }
+  if (btn) { const t = btn.textContent; btn.textContent = '브리핑에 저장됨 ✓'; btn.disabled = true; setTimeout(() => { btn.textContent = t; btn.disabled = false; }, 1800); }
 }
 
 // ── 이력 ─────────────────────────────────────────────────────

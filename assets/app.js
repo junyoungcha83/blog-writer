@@ -1253,7 +1253,7 @@ async function bwSyncInit() {
   if (remote) {
     const local = loadJSON(K_HIST, []); const map = {};
     [...remote, ...local].forEach(h => { if (h && h.id) { const e = map[h.id]; if (!e || String(h.at) > String(e.at)) map[h.id] = h; } });
-    const merged = Object.values(map).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    const merged = Object.values(map).filter(isRecent).sort((a, b) => String(b.at).localeCompare(String(a.at)));   // 30일 지난 건 제외
     saveJSON(K_HIST, merged);
     renderHistory();
     if (merged.length !== remote.length) bwPush(); else bwSyncStatus('saved');
@@ -1264,6 +1264,15 @@ async function bwSyncInit() {
 
 // ── 이력 ─────────────────────────────────────────────────────
 
+// 30일 지난 이력은 자동 삭제 (용량 누적 방지). at 이 없거나 이상하면 보존.
+const HIST_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+function isRecent(h) { const t = new Date(h && h.at).getTime(); return !Number.isFinite(t) || t >= Date.now() - HIST_TTL_MS; }
+function pruneHistoryLocal() {
+  const s = loadJSON(K_HIST, []); const r = s.filter(isRecent);
+  if (r.length !== s.length) { saveJSON(K_HIST, r); return true; }
+  return false;
+}
+
 function pushHistory() {
   const list = loadJSON(K_HIST, []).filter(h => h.id !== draft.id);
   list.unshift({
@@ -1271,16 +1280,17 @@ function pushHistory() {
     input: draft.input, opts: draft.opts, stages: draft.stages,
     status: draft.status, err: {}, titleIdx: draft.titleIdx,
   });
-  saveJSON(K_HIST, list.slice(0, MAX_HIST));
+  saveJSON(K_HIST, list.filter(isRecent).slice(0, MAX_HIST));
   bwSchedulePush();
 }
 
 function renderHistory() {
+  if (pruneHistoryLocal()) bwSchedulePush();   // 볼 때 30일 지난 항목 정리
   const list = loadJSON(K_HIST, []);
   const box = $('historyBody');
   if (!list.length) {
     box.innerHTML = `<div class="hint-card"><b>아직 이력이 없어요.</b>
-      글을 하나 완성하면 여기에 쌓입니다. 이 기기에만 저장되고 최대 ${MAX_HIST}건까지 남습니다.</div>`;
+      글을 하나 완성하면 여기에 쌓입니다. 최대 ${MAX_HIST}건까지 남고, <b>30일이 지난 글은 자동으로 삭제</b>됩니다.</div>`;
     return;
   }
   box.innerHTML = list.map(h => {
@@ -1469,6 +1479,7 @@ function bindTabs() {
   renderOpts();
   renderStages();
 
+  pruneHistoryLocal();          // 시작 시 30일 지난 이력 정리
   updateSyncUI();
   $('syncBtn').onclick = promptBwToken;
   bwSyncInit();

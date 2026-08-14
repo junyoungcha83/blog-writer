@@ -1,0 +1,6 @@
+name = "blog-writer-api"
+main = "src/index.js"
+compatibility_date = "2025-05-01"
+[[kv_namespaces]]
+binding = "HIST"
+id = "5ba0c42fcc774a02b34f1528bedca760"

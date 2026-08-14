@@ -939,6 +939,66 @@ function download(name, text) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
+// ── 서식 그대로 복사(네이버 블로그용) — 렌더된 결과를 text/html 로 클립보드에 ──
+// 붙여넣기 하는 편집기(네이버 스마트에디터·워드 등)가 서식(제목·굵게·목록·표·그래프)을 그대로 받는다.
+function inlineArticleStyles(root) {
+  const set = (sel, css) => root.querySelectorAll(sel).forEach(e => e.setAttribute('style', css));
+  set('h1', 'font-size:1.9em;font-weight:800;margin:0 0 .6em;line-height:1.35;');
+  set('h2', 'font-size:1.4em;font-weight:800;margin:1.5em 0 .5em;line-height:1.4;');
+  set('h3', 'font-size:1.15em;font-weight:700;margin:1.2em 0 .4em;');
+  set('p', 'margin:0 0 1em;line-height:1.9;');
+  set('ul,ol', 'margin:0 0 1em;padding-left:1.5em;line-height:1.9;');
+  set('li', 'margin:.25em 0;');
+  set('blockquote', 'margin:1em 0;padding:.6em 1em;border-left:4px solid #cbd5e1;color:#475569;background:#f8fafc;');
+  set('strong,b', 'font-weight:700;');
+  set('table', 'border-collapse:collapse;width:100%;margin:1em 0;font-size:.95em;');
+  set('th', 'border:1px solid #d1d5db;padding:.45em .6em;background:#f1f5f9;text-align:left;');
+  set('td', 'border:1px solid #d1d5db;padding:.45em .6em;text-align:left;');
+  set('img', 'max-width:100%;height:auto;display:block;margin:1em auto;');
+  set('hr', 'border:none;border-top:1px solid #e2e8f0;margin:1.5em 0;');
+}
+function buildRichHtml() {
+  const srcMd = $('resultBody') && $('resultBody').querySelector('.md');
+  const wrap = document.createElement('div');
+  wrap.setAttribute('style', 'font-family:-apple-system,\'Malgun Gothic\',\'Apple SD Gothic Neo\',sans-serif;font-size:16px;line-height:1.9;color:#111;');
+  const h1 = document.createElement('h1'); h1.textContent = chosenTitle(); wrap.appendChild(h1);
+  if (srcMd) {
+    const clone = srcMd.cloneNode(true);
+    const live = srcMd.querySelectorAll('canvas');           // 렌더된 그래프 → PNG 이미지로(붙여넣기 유지)
+    clone.querySelectorAll('canvas').forEach((cn, i) => {
+      try { const img = document.createElement('img'); img.src = live[i].toDataURL('image/png'); cn.replaceWith(img); }
+      catch (_) { cn.remove(); }
+    });
+    clone.querySelectorAll('.viz-btns, button, .viz-warn').forEach(b => b.remove());   // 버튼·경고 제거
+    wrap.appendChild(clone);
+  }
+  inlineArticleStyles(wrap);
+  return wrap.outerHTML;
+}
+async function richCopy(btn) {
+  const html = buildRichHtml();
+  const plain = mdToPlain(buildMarkdown().replace(/^# .*\n/, ''));
+  const done = () => { const old = btn.textContent; btn.textContent = '복사됐어요 ✓'; btn.classList.add('on'); setTimeout(() => { btn.textContent = old; btn.classList.remove('on'); }, 1600); };
+  try {
+    if (navigator.clipboard && window.ClipboardItem && window.isSecureContext) {
+      await navigator.clipboard.write([new ClipboardItem({
+        'text/html': new Blob([html], { type: 'text/html' }),
+        'text/plain': new Blob([plain], { type: 'text/plain' }),
+      })]);
+      done(); return;
+    }
+  } catch (_) {}
+  // 폴백: contenteditable 선택 후 execCommand('copy') — 리치 텍스트로 복사됨
+  const div = document.createElement('div');
+  div.contentEditable = 'true'; div.innerHTML = html;
+  div.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;';
+  document.body.appendChild(div);
+  const range = document.createRange(); range.selectNodeContents(div);
+  const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+  try { document.execCommand('copy'); done(); } catch (_) {}
+  sel.removeAllRanges(); div.remove();
+}
+
 function sourceStatus() {
   const fc = draft.stages.factcheck || {};
   const found = fc.source_types_found || {};
@@ -978,6 +1038,7 @@ function renderResult() {
     <div class="sec">
       <h3>📄 본문 <span class="badge ${((w.char_count || 0) >= LENGTHS[draft.opts.length].chars * 0.7) ? 'ok' : 'warn'}">약 ${(w.char_count || 0).toLocaleString('ko-KR')}자</span></h3>
       <div class="btnrow">
+        <button class="mini strong" data-rich="1" title="서식(제목·굵게·목록·표·그래프)을 그대로 클립보드에 복사 — 네이버 블로그에 붙여넣으면 모양이 유지됩니다">📋 서식 그대로 복사(네이버)</button>
         <button class="mini" data-copy="md">마크다운 복사</button>
         <button class="mini" data-copy="html">HTML 복사</button>
         <button class="mini" data-copy="plain">평문 복사</button>
@@ -1091,6 +1152,8 @@ function renderResult() {
   };
   const bf = box.querySelector('[data-briefing]');
   if (bf) bf.onclick = () => saveToBriefing(bf);
+  const rc = box.querySelector('[data-rich]');
+  if (rc) rc.onclick = () => richCopy(rc);
   box.querySelectorAll('[data-png]').forEach(b => {
     b.onclick = () => savePng(Number(b.dataset.png));
   });
@@ -1144,6 +1207,61 @@ async function saveToBriefing(btn) {
   } finally { reset(); }
 }
 
+// ── 이력 동기화(여러 기기) — Cloudflare Worker + KV, 비밀번호 보호 ──
+const BW_API = 'https://blog-writer-api.junyoung-cha83.workers.dev';
+const BW_TOKEN_KEY = 'bw-sync-token';
+let _bwSyncTimer = null;
+function bwToken() { try { return localStorage.getItem(BW_TOKEN_KEY) || ''; } catch (_) { return ''; } }
+function bwSyncStatus(s) { const el = $('bwSync'); if (!el) return;
+  const m = { saving: '동기화중…', saved: '동기화됨 ✓', error: '오프라인', readonly: '로컬', '': '' };
+  el.textContent = m[s] ?? ''; el.className = 'sync-status ' + (s || ''); }
+function updateSyncUI() { const b = $('syncBtn'); if (!b) return; const on = !!bwToken();
+  b.textContent = on ? '🔓' : '🔒';
+  b.title = on ? '이력 동기화 켜짐 (탭하여 잠금)' : '이력 동기화 잠금 — 탭하여 비밀번호 입력'; }
+async function bwFetch() {
+  const t = bwToken(); if (!t) return null;
+  try {
+    const r = await fetch(BW_API + '/api/data', { headers: { 'X-Edit-Token': t }, cache: 'no-store' });
+    if (r.status === 401) { try { localStorage.removeItem(BW_TOKEN_KEY); } catch (_) {} updateSyncUI(); return '401'; }
+    if (r.ok) { const j = await r.json(); return Array.isArray(j.items) ? j.items : []; }
+  } catch (_) {}
+  return null;
+}
+function bwSchedulePush() { if (!bwToken()) return; clearTimeout(_bwSyncTimer); _bwSyncTimer = setTimeout(bwPush, 1000); }
+async function bwPush() {
+  const t = bwToken(); if (!t) return; bwSyncStatus('saving');
+  try {
+    const r = await fetch(BW_API + '/api/data', { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Edit-Token': t }, body: JSON.stringify({ items: loadJSON(K_HIST, []) }) });
+    if (r.status === 401) { try { localStorage.removeItem(BW_TOKEN_KEY); } catch (_) {} updateSyncUI(); bwSyncStatus('error'); alert('동기화 비밀번호가 올바르지 않습니다.'); }
+    else if (r.ok) bwSyncStatus('saved'); else bwSyncStatus('error');
+  } catch (_) { bwSyncStatus('error'); }
+}
+function promptBwToken() {
+  const cur = bwToken();
+  const v = prompt(cur ? '이력 동기화 비밀번호 (지우고 확인 시 잠금)' : '이력 동기화 비밀번호를 입력하세요 (다른 기기와 공유)', cur);
+  if (v === null) return;
+  try { if (v.trim()) localStorage.setItem(BW_TOKEN_KEY, v.trim()); else localStorage.removeItem(BW_TOKEN_KEY); } catch (_) {}
+  updateSyncUI();
+  if (bwToken()) bwSyncInit(); else bwSyncStatus('readonly');
+}
+// 시작·잠금해제 시: 서버 이력과 로컬을 병합(id 기준 최신 우선) → 어느 기기 이력도 잃지 않음
+async function bwSyncInit() {
+  if (!bwToken()) { bwSyncStatus('readonly'); return; }
+  bwSyncStatus('saving');
+  const remote = await bwFetch();
+  if (remote === '401') { bwSyncStatus('error'); return; }
+  if (remote) {
+    const local = loadJSON(K_HIST, []); const map = {};
+    [...remote, ...local].forEach(h => { if (h && h.id) { const e = map[h.id]; if (!e || String(h.at) > String(e.at)) map[h.id] = h; } });
+    const merged = Object.values(map).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    saveJSON(K_HIST, merged);
+    renderHistory();
+    if (merged.length !== remote.length) bwPush(); else bwSyncStatus('saved');
+  } else {
+    if (loadJSON(K_HIST, []).length) bwPush(); else bwSyncStatus('saved');
+  }
+}
+
 // ── 이력 ─────────────────────────────────────────────────────
 
 function pushHistory() {
@@ -1154,6 +1272,7 @@ function pushHistory() {
     status: draft.status, err: {}, titleIdx: draft.titleIdx,
   });
   saveJSON(K_HIST, list.slice(0, MAX_HIST));
+  bwSchedulePush();
 }
 
 function renderHistory() {
@@ -1178,6 +1297,7 @@ function renderHistory() {
     b.onclick = e => {
       if (e.target.dataset.del) {
         saveJSON(K_HIST, loadJSON(K_HIST, []).filter(h => h.id !== e.target.dataset.del));
+        bwSchedulePush();
         renderHistory();
         return;
       }
@@ -1348,6 +1468,10 @@ function bindTabs() {
   renderInput();
   renderOpts();
   renderStages();
+
+  updateSyncUI();
+  $('syncBtn').onclick = promptBwToken;
+  bwSyncInit();
 
   if (!getKey()) openSheet();
 })();

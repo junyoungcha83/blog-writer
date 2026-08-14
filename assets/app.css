@@ -37,6 +37,8 @@ body {
   background: rgba(255,255,255,.12); border: 0; color: #fff;
   width: 34px; height: 34px; border-radius: 10px; font-size: 1rem; cursor: pointer;
 }
+.sync-status { font-size: .72rem; font-weight: 700; opacity: .9; white-space: nowrap; }
+.sync-status.saving { color: #fde68a; } .sync-status.saved { color: #bbf7d0; } .sync-status.error { color: #fecaca; }
 
 /* 보기 탭 */
 .viewtabs {
@@ -188,6 +190,7 @@ body {
 }
 .mini:active { transform: scale(.96) }
 .mini.on { background: var(--ok); border-color: var(--ok); color: #fff; }
+.mini.strong { background: var(--header, #2563eb); border-color: transparent; color: #fff; }
 
 /* 마크다운 미리보기 */
 .md { font-size: .95rem; }

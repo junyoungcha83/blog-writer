@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>블로그작성</title>
-<link rel="stylesheet" href="assets/app.css?v=2" />
+<link rel="stylesheet" href="assets/app.css?v=3" />
 
 <!-- PWA -->
 <link rel="manifest" href="manifest.webmanifest?v=2" />
@@ -23,6 +23,8 @@
 
 <header class="app-header">
   <h1>블로그작성</h1>
+  <span class="sync-status" id="bwSync"></span>
+  <button class="hdr-btn" id="syncBtn" type="button" title="이력 동기화 잠금/해제" aria-label="동기화">🔒</button>
   <button class="hdr-btn" id="settingsBtn" type="button" aria-label="설정">⚙︎</button>
 </header>
 
@@ -137,7 +139,7 @@
 </div>
 
 <script src="assets/agents.js?v=2"></script>
-<script src="assets/app.js?v=4"></script>
+<script src="assets/app.js?v=5"></script>
 <script>
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
     window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));

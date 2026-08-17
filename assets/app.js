@@ -50,6 +50,10 @@ const MODERN_TOOL_MODELS = { 'claude-opus-5': 1, 'claude-sonnet-5': 1 };
 const useModernTools = m => !!MODERN_TOOL_MODELS[m] && loadJSON(K_BASICTOOLS, {})[m] !== true;
 function blockModernTools(m) { const o = loadJSON(K_BASICTOOLS, {}); o[m] = true; saveJSON(K_BASICTOOLS, o); }
 
+// 웹페이지 1장에서 가져올 최대 토큰. 기사 본문은 보통 2,000~6,000 토큰이다.
+const FETCH_MAX_TOKENS = 12000;
+let fetchCapBlocked = false;          // 이 파라미터를 거부하는 모델이 있으면 한 번만 빼고 재시도
+
 function toolsFor(mode, model) {
   if (mode === 'none') return null;
   const modern = useModernTools(model);
@@ -57,9 +61,13 @@ function toolsFor(mode, model) {
     ? { type: 'web_search_20260209', name: 'web_search', max_uses: 6 }
     : { type: 'web_search_20250305', name: 'web_search', max_uses: 6 };
   if (mode === 'search') return [search];
-  const fetchTool = modern
-    ? { type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 3 }
-    : { type: 'web_fetch_20250910', name: 'web_fetch', max_uses: 3 };
+  // max_content_tokens 는 반드시 준다. 없으면 페이지를 통째로(본문 + 네비·광고·댓글·스크립트)
+  // 가져와 한 장에 수만 토큰이 들어오고, pause_turn 으로 이어받을 때마다 그 내용을 다시 보내
+  // 입력비가 라운드 수만큼 곱해진다. 실측에서 Researcher 한 단계가 전체 비용의 87% 를 차지했다.
+  // 기사 본문은 보통 2,000~6,000 토큰이라 12,000 이면 잘릴 일이 거의 없다.
+  const fetchTool = { type: modern ? 'web_fetch_20260209' : 'web_fetch_20250910',
+                      name: 'web_fetch', max_uses: 3 };
+  if (!fetchCapBlocked) fetchTool.max_content_tokens = FETCH_MAX_TOKENS;
   return [fetchTool, search];
 }
 
@@ -105,13 +113,15 @@ function monthCost() {
 function avgPerPost() {
   const log = loadJSON(K_USAGE, []).filter(e => e.stage === 'seo');
   if (!log.length) return null;
-  // seo 단계 시각을 글 1편의 끝으로 보고, 그 직전 4개 단계 비용을 묶는다
+  // seo 단계 시각을 글 1편의 끝으로 보고, 그 직전 단계들을 묶는다.
+  // 기록은 최신이 앞(unshift)이므로 seo 위치에서 STAGES 개수만큼 뒤로 훑는다.
+  // 예전에는 4개만 더해서 6단계 중 2개가 빠진 값이 '평균'으로 나왔다.
   const all = loadJSON(K_USAGE, []);
   let total = 0, n = 0;
   for (const end of log.slice(0, 10)) {
     const i = all.findIndex(e => e.at === end.at && e.stage === 'seo');
     if (i < 0) continue;
-    total += all.slice(i, i + 4).reduce((s, e) => s + e.cost, 0);
+    total += all.slice(i, i + STAGES.length).reduce((s, e) => s + e.cost, 0);
     n++;
   }
   return n ? total / n : null;
@@ -141,9 +151,10 @@ async function callClaude({ system, userText, toolMode, maxTokens, model, stage,
       if (useEffort(model)) body.output_config = { effort };
 
       res = await postJSON(key, body);
-      if (res.status !== 400 || attempt >= 2) break;
+      if (res.status !== 400 || attempt >= 3) break;
 
       const msg = await peekError(res);
+      if (/max_content_tokens/i.test(msg) && !fetchCapBlocked) { fetchCapBlocked = true; continue; }
       if (/effort|output_config/i.test(msg) && body.output_config) { blockEffort(model); continue; }
       if (/programmatic tool calling|allowed_callers|web_search|web_fetch/i.test(msg) && useModernTools(model)) {
         blockModernTools(model); continue;

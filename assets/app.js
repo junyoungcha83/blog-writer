@@ -1324,6 +1324,8 @@ function renderHistory() {
 // ── 정보 탭 ──────────────────────────────────────────────────
 
 const kv = (k, v) => `<div class="kv"><span>${k}</span><b>${v}</b></div>`;
+// 합계 줄 — 위 항목들과 구분되게 굵은 선을 얹는다
+const kvTotal = (k, v) => `<div class="kv kv-total"><span>${k}</span><b>${v}</b></div>`;
 
 function renderInfo() {
   const m = getModel();
@@ -1357,10 +1359,29 @@ function renderInfo() {
 
     <div class="sec">
       <h3>📋 단계별 최근 비용</h3>
-      ${STAGES.map(st => {
-        const last = log.find(e => e.stage === st.key);
-        return kv(`${st.no} ${st.label}`, last ? `${usd(last.cost)} <small>· 검색 ${last.searches || 0}회</small>` : '<small>기록 없음</small>');
-      }).join('')}
+      ${(() => {
+        // 단계마다 '가장 최근 1회'를 보여주고, 그 합계를 함께 낸다.
+        // 합계는 마지막으로 돌린 글 1편에 든 비용에 가깝다(건너뛴 단계는 빠진다).
+        const rows = STAGES.map(st => ({ st, last: log.find(e => e.stage === st.key) }));
+        const done = rows.filter(r => r.last);
+        const sum = done.reduce((s, r) => s + r.last.cost, 0);
+        const searches = done.reduce((s, r) => s + (r.last.searches || 0), 0);
+
+        const body = rows.map(({ st, last }) => kv(
+          `${st.no} ${st.label}`,
+          last
+            ? `${usd(last.cost)} <small>(${krw(last.cost)}) · 검색 ${last.searches || 0}회</small>`
+            : '<small>기록 없음</small>'
+        )).join('');
+
+        if (!done.length) return body;
+
+        return body + kvTotal('합계',
+          `${usd(sum)} <small>(${krw(sum)}) · 검색 ${searches}회</small>`)
+          + `<p class="tiny">${done.length}/${STAGES.length}단계 기록 기준입니다.
+             각 단계의 가장 최근 1회를 더한 값이라, 마지막으로 만든 글 1편의 비용에 가깝습니다.
+             ${done.length < STAGES.length ? '기록이 없는 단계는 빠져 있습니다.' : ''}</p>`;
+      })()}
     </div>
 
     <div class="sec">

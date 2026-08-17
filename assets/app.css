@@ -256,6 +256,10 @@ body {
   padding: 8px 0; border-top: 1px dashed var(--border); font-size: .9rem;
 }
 .kv:first-of-type { border-top: 0 }
+/* 합계 줄 — 항목들과 구분되게 실선 + 강조색 */
+.kv-total { border-top: 2px solid var(--accent); font-size: .95rem; }
+.kv-total > span { color: var(--text); font-size: .88rem; }
+.kv-total > b { color: var(--accent); }
 .kv > span { color: var(--muted); flex: none; font-size: .82rem; font-weight: 700 }
 .kv > b { text-align: right; font-weight: 700; min-width: 0; word-break: break-word }
 .seo-g { border-top: 1px dashed var(--border); padding-top: 10px; margin-top: 10px; }

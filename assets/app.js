@@ -103,28 +103,43 @@ function logUsage(stage, model, u) {
   log.unshift({ at: Date.now(), stage, model, cost: costOf(model, u), in: u.in, out: u.out, searches: u.searches });
   saveJSON(K_USAGE, log.slice(0, 300));
 }
+// 이번 달(현지 기준) 1일 0시 — 비용과 호출 수가 같은 기준을 쓰도록 한 곳에서 만든다
+function monthFrom() {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+}
+// 이번 달 기록
+function monthLog() {
+  return loadJSON(K_USAGE, []).filter(e => e.at >= monthFrom());
+}
 // 이번 달(현지 기준) 누적 비용
 function monthCost() {
-  const now = new Date();
-  const from = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-  return loadJSON(K_USAGE, []).filter(e => e.at >= from).reduce((s, e) => s + e.cost, 0);
+  return monthLog().reduce((s, e) => s + e.cost, 0);
 }
-// 글 1편 평균 비용 (완료된 글 기준)
-function avgPerPost() {
-  const log = loadJSON(K_USAGE, []).filter(e => e.stage === 'seo');
-  if (!log.length) return null;
-  // seo 단계 시각을 글 1편의 끝으로 보고, 그 직전 단계들을 묶는다.
-  // 기록은 최신이 앞(unshift)이므로 seo 위치에서 STAGES 개수만큼 뒤로 훑는다.
-  // 예전에는 4개만 더해서 6단계 중 2개가 빠진 값이 '평균'으로 나왔다.
-  const all = loadJSON(K_USAGE, []);
-  let total = 0, n = 0;
-  for (const end of log.slice(0, 10)) {
-    const i = all.findIndex(e => e.at === end.at && e.stage === 'seo');
-    if (i < 0) continue;
-    total += all.slice(i, i + STAGES.length).reduce((s, e) => s + e.cost, 0);
-    n++;
+// 기록을 '작업 묶음'으로 자른다 — 바로 앞 기록과 1시간 넘게 벌어지면 다른 묶음이다.
+// 글 1편은 단계 재실행까지 해도 보통 몇 분 안에 끝나므로, 묶음 하나가 글 1편에 해당한다.
+// (기록은 최신이 앞이라 묶음도 최신이 앞이다.)
+const RUN_GAP_MS = 60 * 60 * 1000;
+function splitRuns(log) {
+  const runs = [];
+  for (const e of log) {
+    const cur = runs[runs.length - 1];
+    if (cur && cur[cur.length - 1].at - e.at <= RUN_GAP_MS) cur.push(e);
+    else runs.push([e]);
   }
-  return n ? total / n : null;
+  return runs;
+}
+const lastRunLog = log => splitRuns(log)[0] || [];
+// 글 1편 평균 비용 — 위 묶음 그대로 센다(재실행·실패분 포함, 최근 10편).
+// 예전에는 seo 기록에서 무조건 STAGES 개수만큼 잘라 더해서, 단계를 건너뛰거나
+// 다시 돌린 글은 앞뒤 글의 요금이 섞여 들어가 실제와 다른 평균이 나왔다.
+function avgPerPost() {
+  const posts = splitRuns(loadJSON(K_USAGE, []))
+    .filter(r => r.some(e => e.stage === 'seo'))    // 마지막 단계까지 간 것만 '글 1편'
+    .slice(0, 10);
+  if (!posts.length) return null;
+  const total = posts.reduce((s, r) => s + r.reduce((a, e) => a + e.cost, 0), 0);
+  return total / posts.length;
 }
 
 // ── API 호출 ─────────────────────────────────────────────────
@@ -138,7 +153,7 @@ async function callClaude({ system, userText, toolMode, maxTokens, model, stage,
   if (!key) throw new AppError('API 키가 없어요', '오른쪽 위 ⚙︎ 에서 Anthropic API 키를 넣어 주세요.');
 
   let messages = [{ role: 'user', content: userText }];
-  let out = [];
+  let turn = [];        // 이번 턴의 assistant 블록 (pause_turn 이어달리기까지 합친 것)
   const usage = { in: 0, out: 0, cacheRead: 0, cacheWrite: 0, searches: 0 };
 
   for (let i = 0; i <= maxContinuations; i++) {
@@ -171,17 +186,17 @@ async function callClaude({ system, userText, toolMode, maxTokens, model, stage,
     usage.cacheWrite += u.cache_creation_input_tokens || 0;
     usage.searches += (u.server_tool_use && u.server_tool_use.web_search_requests) || 0;
 
-    for (const b of data.content || []) {
-      if (b.type === 'text' && b.text) out.push(b.text);
-    }
+    turn = mergeTurn(turn, data.content || []);
 
     if (data.stop_reason === 'refusal') {
       logUsage(stage, model, usage);
       throw new AppError('답변이 거절됐어요',
         '이 주제는 안전 정책상 답할 수 없다고 나왔어요. 다른 주제나 표현으로 시도해 보세요.');
     }
-    if (data.stop_reason === 'pause_turn') {          // 서버 도구가 아직 도는 중 — 그대로 이어붙여 재요청
-      messages = [{ role: 'user', content: userText }, { role: 'assistant', content: data.content }];
+    if (data.stop_reason === 'pause_turn') {          // 서버 도구가 아직 도는 중 — 지금까지 만든 걸 그대로 붙여 재요청
+      // 이번 턴 전체를 되돌려 준다. 최신 응답만 보내면 앞 라운드의 검색 결과가 빠져
+      // 모델이 같은 검색을 다시 돌고, 그만큼 검색비와 입력 토큰이 더 나간다.
+      messages = [{ role: 'user', content: userText }, { role: 'assistant', content: trimTail(turn) }];
       continue;
     }
     if (data.stop_reason === 'max_tokens') {
@@ -192,7 +207,29 @@ async function callClaude({ system, userText, toolMode, maxTokens, model, stage,
     break;
   }
   logUsage(stage, model, usage);
-  return { text: out.join('\n') };
+  return { text: turn.filter(b => b.type === 'text' && b.text).map(b => b.text).join('\n') };
+}
+
+// pause_turn 응답이 '이번 턴 전체'로 오는지 '새로 만든 부분'만 오는지는 보장돼 있지 않다.
+// 새 응답이 이미 가진 블록 전부로 시작하면 전체 재전송으로 보고 갈아끼우고, 아니면 뒤에 잇는다.
+// 그냥 이어붙이면 같은 문단이 두 번 들어가 본문도 비용도 부풀어 오른다.
+function mergeTurn(prev, next) {
+  if (!prev.length || !next.length) return prev.concat(next);
+  const resent = JSON.stringify(next.slice(0, prev.length)) === JSON.stringify(prev);
+  return resent ? next.slice() : prev.concat(next);
+}
+
+// 되돌려 보내는 assistant 메시지의 끝 공백은 API 가 400 으로 거부한다.
+// 마지막 텍스트 블록만 다듬는다(원본 turn 은 그대로 둬야 본문이 안 잘린다).
+function trimTail(blocks) {
+  const i = blocks.length - 1;
+  if (i < 0 || blocks[i].type !== 'text') return blocks;
+  const t = String(blocks[i].text || '').replace(/\s+$/, '');
+  if (t === blocks[i].text) return blocks;
+  if (!t) return blocks.slice(0, i);                 // 공백뿐인 블록은 통째로 뺀다
+  const out = blocks.slice();
+  out[i] = Object.assign({}, blocks[i], { text: t });
+  return out;
 }
 
 function postJSON(key, body) {
@@ -334,7 +371,7 @@ function mdToHtml(md) {
 
     // [[viz:1]] 자리표시자 — 여기에 차트를 그린다
     const vz = line.match(/^\[\[viz:(\d+)\]\]$/);
-    if (vz) { flushAll(); out.push(` VIZ${Number(vz[1])} `); continue; }
+    if (vz) { flushAll(); out.push(`\u0000VIZ${Number(vz[1])}\u0000`); continue; }
 
     flushList(); flushQuote();
     para.push(line);
@@ -346,7 +383,7 @@ function mdToHtml(md) {
 // 본문 HTML 의 자리표시자를 실제 차트로 교체. 남는 자리표시자·미사용 차트도 처리한다.
 function injectViz(html, vizList) {
   const used = new Set();
-  let outHtml = html.replace(/ VIZ(\d+) /g, (m, n) => {
+  let outHtml = html.replace(/\u0000VIZ(\d+)\u0000/g, (m, n) => {
     const i = Number(n) - 1;
     const v = vizList[i];
     // Writer 가 없는 번호를 참조한 경우. 내부 토큰을 그대로 보여 주지 않는다.
@@ -1338,6 +1375,15 @@ const kv = (k, v) => `<div class="kv"><span>${k}</span><b>${v}</b></div>`;
 // 합계 줄 — 위 항목들과 구분되게 굵은 선을 얹는다
 const kvTotal = (k, v) => `<div class="kv kv-total"><span>${k}</span><b>${v}</b></div>`;
 
+// 묶음이 돌아간 시각 — 같은 날이면 '8월 21일 09:31~09:36' 처럼 날짜를 한 번만 쓴다.
+function runWhen(run) {
+  const day = t => new Date(t).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' });
+  const hm = t => new Date(t).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false });
+  const a = run[run.length - 1].at, b = run[0].at;
+  if (day(a) !== day(b)) return `${day(a)} ${hm(a)} ~ ${day(b)} ${hm(b)}`;
+  return hm(a) === hm(b) ? `${day(b)} ${hm(b)}` : `${day(b)} ${hm(a)}~${hm(b)}`;
+}
+
 function renderInfo() {
   const m = getModel();
   const info = MODEL_INFO[m] || {};
@@ -1345,6 +1391,7 @@ function renderInfo() {
   const log = loadJSON(K_USAGE, []);
   const avg = avgPerPost();
   const month = monthCost();
+  const monthN = monthLog().length;
   const lim = budget();
 
   $('infoBody').innerHTML = `
@@ -1362,36 +1409,57 @@ function renderInfo() {
       ${kv('글 1편 평균', avg != null ? `${usd(avg)} <small>(${krw(avg)})</small>` : '<small>아직 실측 없음 — 대략 $0.3~0.5</small>')}
       ${kv('이번 달 누적', `${usd(month)} <small>(${krw(month)})</small>`)}
       ${kv('이번 달 한도', lim > 0 ? `${usd(lim)}` : '<small>설정 안 함</small>')}
-      ${kv('기록된 호출', `${log.length}회`)}
+      ${kv('이번 달 호출', `${monthN}회 <small>(전체 기록 ${log.length}회)</small>`)}
       <p class="tiny">이 값은 응답의 <code>usage</code> 를 공식 단가로 계산한 <b>실측</b>이에요.
-        환율은 표시용 어림값(1달러=${KRW_PER_USD.toLocaleString('ko-KR')}원)입니다.</p>
+        환율은 표시용 어림값(1달러=${KRW_PER_USD.toLocaleString('ko-KR')}원)입니다.
+        <b>글 1편 평균</b>은 마지막 단계까지 간 글만, 그 글에서 다시 돌리거나 실패한 호출까지
+        더한 실제 지출입니다(최근 10편).</p>
+      <p class="tiny">호출 1회는 <b>단계 1개</b>입니다. 글 1편이 꼭 ${STAGES.length}회는 아니에요 —
+        시각자료가 없으면 ④가 빠지고, 단계를 다시 돌리거나 실패한 것도 각각 1회로 쌓입니다.
+        서버 도구를 쓰는 단계는 그 1회 안에서 API 요청이 여러 번 나가므로,
+        Anthropic 콘솔의 요청 수는 이 값보다 큽니다.</p>
       <button class="ghost wide" id="clearUsage" type="button">사용량 기록 지우기</button>
     </div>
 
     <div class="sec">
-      <h3>📋 단계별 최근 비용</h3>
+      <h3>📋 마지막 글 1편 비용</h3>
       ${(() => {
-        // 단계마다 '가장 최근 1회'를 보여주고, 그 합계를 함께 낸다.
-        // 합계는 마지막으로 돌린 글 1편에 든 비용에 가깝다(건너뛴 단계는 빠진다).
-        const rows = STAGES.map(st => ({ st, last: log.find(e => e.stage === st.key) }));
+        // 마지막으로 이어서 돌린 묶음만 본다 — 이번 달 누적이 아니다.
+        const run = lastRunLog(log);
+        if (!run.length) return '<p class="tiny">아직 기록이 없어요.</p>';
+
+        // 그 묶음 안에서 단계별 '가장 최근 1회'가 이 글에 실제로 쓰인 결과다.
+        const latest = new Map();
+        for (const e of run) if (!latest.has(e.stage)) latest.set(e.stage, e);
+        const rows = STAGES.map(st => ({ st, last: latest.get(st.key) }));
         const done = rows.filter(r => r.last);
         const sum = done.reduce((s, r) => s + r.last.cost, 0);
         const searches = done.reduce((s, r) => s + (r.last.searches || 0), 0);
+        // 다시 돌렸거나 중간에 실패한 호출 — 결과에는 안 남아도 요금은 나갔다.
+        const extra = run.filter(e => latest.get(e.stage) !== e);
+        const extraCost = extra.reduce((s, e) => s + e.cost, 0);
+        const extraSearch = extra.reduce((s, e) => s + (e.searches || 0), 0);
 
         const body = rows.map(({ st, last }) => kv(
           `${st.no} ${st.label}`,
           last
             ? `${usd(last.cost)} <small>(${krw(last.cost)}) · 검색 ${last.searches || 0}회</small>`
-            : '<small>기록 없음</small>'
+            : '<small>안 돌림</small>'
         )).join('');
 
-        if (!done.length) return body;
+        const tail = extra.length
+          ? kv('위 단계 합계', `${usd(sum)} <small>(${krw(sum)}) · 검색 ${searches}회</small>`)
+            + kv(`다시 돌림·실패 ${extra.length}회`,
+                 `+${usd(extraCost)} <small>(${krw(extraCost)}) · 검색 ${extraSearch}회</small>`)
+            + kvTotal('실제 나간 요금',
+                 `${usd(sum + extraCost)} <small>(${krw(sum + extraCost)}) · 검색 ${searches + extraSearch}회</small>`)
+          : kvTotal('합계', `${usd(sum)} <small>(${krw(sum)}) · 검색 ${searches}회</small>`);
 
-        return body + kvTotal('합계',
-          `${usd(sum)} <small>(${krw(sum)}) · 검색 ${searches}회</small>`)
-          + `<p class="tiny">${done.length}/${STAGES.length}단계 기록 기준입니다.
-             각 단계의 가장 최근 1회를 더한 값이라, 마지막으로 만든 글 1편의 비용에 가깝습니다.
-             ${done.length < STAGES.length ? '기록이 없는 단계는 빠져 있습니다.' : ''}</p>`;
+        return body + tail + `<p class="tiny">${esc(runWhen(run))} 에 돌린 ${done.length}단계 기준입니다.
+          단계마다 가장 최근 1회를 더한 값이라, 그 글 1편에 든 비용에 가깝습니다.
+          ${done.length < STAGES.length ? '안 돌린 단계(시각자료가 없으면 ④가 빠집니다)는 빠져 있습니다.' : ''}
+          ${extra.length ? '다시 돌리거나 실패한 호출도 요금은 나가서 따로 더했습니다.' : ''}
+          이번 달 전체는 위 <b>이번 달 누적</b>을 보세요.</p>`;
       })()}
     </div>
 
@@ -1399,7 +1467,7 @@ function renderInfo() {
       <h3>ℹ️ 사용법과 한계</h3>
       <ol class="bul howto" style="padding-left:20px;font-size:.9rem">
         <li>기사 링크 · 원문 · 주제 중 하나를 넣고 옵션 6가지를 고른 뒤 <b>글 만들기</b>를 누릅니다.</li>
-        <li>4단계가 순서대로 돌아갑니다. 단계마다 결과가 저장되니, 마음에 안 드는 단계만
+        <li>${STAGES.length}단계가 순서대로 돌아갑니다. 단계마다 결과가 저장되니, 마음에 안 드는 단계만
           <b>이 단계부터 다시</b>로 다시 돌릴 수 있어요(앞 단계 요금은 다시 안 나갑니다).</li>
         <li>완성되면 📄 결과 탭에서 제목을 고르고 마크다운·HTML·평문으로 복사합니다.</li>
       </ol>

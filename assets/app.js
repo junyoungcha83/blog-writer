@@ -20,7 +20,7 @@ const K_HIST = 'bw-history';        // 완료된 글 이력
 const MAX_HIST = 20;
 
 const STAGES = window.BW.STAGES;
-const { FIELDS, PURPOSES, LENGTHS, RANGES, SOURCE_TYPES, STYLES } = window.BW;
+const { FIELDS, PURPOSES, LENGTHS, RANGES, SOURCE_TYPES, STYLES, TONES } = window.BW;
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => (
@@ -653,10 +653,11 @@ function mdToPlain(md) {
 
 const blankOpts = () => ({
   field: 'realestate', fieldEtc: '', purpose: 'info', length: '3000',
-  range: '7d', sourceTypes: ['press', 'gov', 'public'], style: 'easy',
+  range: '7d', sourceTypes: ['press', 'gov', 'public'], style: 'easy', tone: 'formal',
 });
 
 let draft = loadJSON(K_DRAFT, null) || newDraft();
+draft.opts = { ...blankOpts(), ...draft.opts };   // 옵션이 늘어나기 전 초안에는 새 키가 없다 — 기본값으로 채운다
 
 function newDraft() {
   return {
@@ -693,8 +694,10 @@ function renderOpts() {
       Object.entries(RANGES).map(([k, v]) => [k, v.label]), o.range, false),
     row('sourceTypes', '출처', '여러 개 선택 · 우선순위로만 반영돼요',
       Object.entries(SOURCE_TYPES), o.sourceTypes, true),
-    row('style', '문체', '',
+    row('style', '문체', '글의 구성과 설명 방식',
       Object.entries(STYLES).map(([k, v]) => [k, v.label]), o.style, false),
+    row('tone', '말투', TONES[o.tone] ? TONES[o.tone].hint : '',
+      Object.entries(TONES).map(([k, v]) => [k, v.label]), o.tone, false),
   ].join('');
 
   $('opts').querySelectorAll('.opt').forEach(box => {

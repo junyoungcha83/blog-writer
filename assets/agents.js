@@ -88,6 +88,28 @@ const STYLES = {
   invest: { label: '투자자 분석형', guide: '수치·기간·비교 대상을 항상 함께 제시한다. 쟁점은 양쪽 견해를 나란히 적는다.' },
 };
 
+// 말투(문장 어미). 문체(STYLES)가 '무엇을 어떻게 구성하나'라면 이쪽은 '어미를 무엇으로 맺나'다.
+const TONES = {
+  formal: {
+    label: '습니다체',
+    hint: '차분하고 단정한 느낌',
+    endings: '"~습니다 / ~합니다 / ~입니다"',
+    guide: '모든 문장을 "~습니다 / ~합니다 / ~입니다 / ~했습니다" 로 맺는다.\n' +
+           '- "~해요 / ~예요 / ~거든요" 같은 해요체를 섞지 않는다. 글 전체에서 어미를 일관되게 유지한다.',
+  },
+  soft: {
+    label: '해요체',
+    hint: '말 걸듯 부드러운 느낌',
+    endings: '"~해요 / ~예요 / ~이에요"',
+    guide: '모든 문장을 "~해요 / ~예요 / ~이에요 / ~했어요 / ~인데요" 로 맺는다.\n' +
+           '- 기본은 해요체지만, 수치를 짚거나 결론을 못박는 문장에서는 "~합니다" 를 드물게 써도 된다.\n' +
+           '  다만 한 문단 안에서 두 어미가 번갈아 나오지 않게 한다.\n' +
+           '- 부드럽게 쓴다고 해서 "~죠? / ~잖아요" 같은 구어체 군더더기나 이모지를 넣지는 않는다.',
+  },
+};
+
+const toneOf = opts => TONES[(opts || {}).tone] || TONES.formal;
+
 // ── 모든 역할이 공유하는 원칙 ─────────────────────────────────
 // 브리핑 앱 GENERATE.md 와 realestate-briefing 스킬의 작성 원칙을 그대로 가져왔다.
 
@@ -319,6 +341,7 @@ function writerSystem(opts) {
   const len = LENGTHS[opts.length];
   const purpose = PURPOSES[opts.purpose];
   const style = STYLES[opts.style];
+  const tone = toneOf(opts);
   const risky = opts.field === 'realestate' || opts.field === 'stock';
 
   return `${COMMON_RULES}
@@ -330,19 +353,18 @@ ${fieldBlock(opts)}
 문체: ${style.label} — ${style.guide}
 분량: 본문 약 ${len.chars}자 (공백 포함). 소제목 ${len.sections}개.
 
-어투(모든 문체에 공통으로 적용되는 최우선 규칙):
-- 본문은 독자에게 말을 거는 존댓말로 쓴다. "~한다 / ~이다 / ~았다" 같은 평서형(하다체)은 쓰지 않는다.
-- 기본은 "~습니다 / ~합니다 / ~입니다" 로 끝맺고, 설명을 부드럽게 풀어 주는 대목에서는
-  "~해요 / ~인데요 / ~거든요" 를 섞어도 된다. 다만 한 문단 안에서 어미가 들쭉날쭉하지 않게 한다.
+어투(모든 문체에 공통으로 적용되는 최우선 규칙) — ${tone.label}:
+- ${tone.guide}
+- "~한다 / ~이다 / ~았다" 같은 평서형(하다체)과 반말은 어떤 경우에도 쓰지 않는다.
 - 딱딱한 보고서 말투 대신 차분하게 설명해 주는 말투를 쓴다. 과장이나 호들갑은 넣지 않는다.
 - 예외: 소제목(##), 표의 항목, 목록의 짧은 항목, 각주의 자료 제목은 명사형·질문형 그대로 두어도 된다.
-  문장 형태로 쓸 때만 존댓말로 끝맺는다.
+  문장 형태로 쓸 때만 위 어미를 적용한다.
 
 작성 규칙:
 - 본문의 모든 수치·주장은 주어진 facts 에 있는 것만 쓴다. facts 에 없으면 쓰지 않는다.
 - 근거가 되는 문장 끝에 [1] [2] 형태로 각주 번호를 단다. 번호는 footnotes 배열의 순서와 정확히 일치해야 한다.
 - 쟁점(disputed)은 한쪽으로 정리하지 말고 양쪽을 나란히 소개한다.
-- 전망·의견(opinions)을 쓸 때는 "누가 그렇게 봅니다 / ~라고 밝혔습니다" 처럼 주체를 밝히는 형태로만 쓴다. 네 의견처럼 쓰면 안 된다.
+- 전망·의견(opinions)은 말한 주체를 반드시 밝히는 형태로 쓴다(예: "○○연구원은 …라고 밝혔습니다" — 어미는 위 어투에 맞춘다). 네 의견처럼 쓰면 안 된다.
 - Analyst 의 recommended_structure 를 소제목 순서의 출발점으로 쓴다. 더 나은 순서가 있으면 바꿔도 된다.
 - Analyst 의 key_points·analysis·different_views·risks·implications 를 본문에 녹인다.
   다만 각 항목을 그대로 나열하지 말고 문단으로 풀어 쓴다.
@@ -356,7 +378,7 @@ ${fieldBlock(opts)}
   차트가 말하는 내용을 본문에서 한 문장으로 짚어 준다("표에서 보듯" 같은 빈말은 쓰지 않는다).
   visualizations 가 비어 있으면 자리표시자를 넣지 않는다. 없는 번호를 쓰면 안 된다.
 ${risky
-  ? '- disclaimer 에 투자 판단 책임 고지문을 한두 문장으로 넣는다(이 글은 정보 제공 목적이며 투자 판단과 그 결과는 독자 본인에게 있다는 취지). 이 문구도 존댓말로 쓴다.'
+  ? '- disclaimer 에 투자 판단 책임 고지문을 한두 문장으로 넣는다(이 글은 정보 제공 목적이며 투자 판단과 그 결과는 독자 본인에게 있다는 취지). 이 문구도 위 어투에 맞춘다.'
   : '- disclaimer 는 빈 문자열로 둔다.'}
 
 출력 JSON 스키마:
@@ -389,14 +411,16 @@ ${JSON.stringify(viz.map((v, i) => ({ n: i + 1, type: v.type, title: v.title, un
 // ── ④ SEO ────────────────────────────────────────────────────
 
 function seoSystem(opts) {
+  const tone = toneOf(opts);
   return `${COMMON_RULES}
 
 너의 역할: SEO. 완성된 본문을 읽고 검색 유입과 클릭을 위한 재료를 만든다. 새 사실을 만들지 않는다.
 
 규칙:
 - 모든 결과는 본문에 실제로 있는 내용만 근거로 한다.
-- 어투: 문장 형태로 쓰는 결과물(meta_description, faq 의 a)은 본문과 같은 존댓말로 끝맺는다.
-  "~한다 / ~이다" 평서형은 쓰지 않는다. 제목·키워드·태그·썸네일 문구는 명사형·질문형 그대로 두어도 된다.
+- 어투: 문장 형태로 쓰는 결과물(meta_description, faq 의 a)은 본문과 같은 ${tone.label}로,
+  ${tone.endings} 처럼 끝맺는다. "~한다 / ~이다" 평서형과 반말은 쓰지 않는다.
+  제목·키워드·태그·썸네일 문구는 명사형·질문형 그대로 두어도 된다.
 - seo_titles: 검색 의도를 담은 제목 5개. 각 32자 이내. 낚시성 과장 금지.
 - meta_description: 검색결과에 노출될 요약. 80~155자. 핵심 키워드를 앞쪽에.
 - primary_keywords: 이 글이 노려야 할 핵심 키워드 3~5개.
@@ -482,6 +506,6 @@ const STAGES = [
   },
 ];
 
-window.BW = { FIELDS, PURPOSES, LENGTHS, RANGES, SOURCE_TYPES, STYLES, STAGES };
+window.BW = { FIELDS, PURPOSES, LENGTHS, RANGES, SOURCE_TYPES, STYLES, TONES, STAGES };
 
 })();

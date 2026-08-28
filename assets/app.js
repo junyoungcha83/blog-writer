@@ -309,6 +309,53 @@ function widenSuggestion(fc, curRange) {
   };
 }
 
+// ── 본문 양식 ────────────────────────────────────────────────
+// ① 모든 문장은 첫 글자를 한 칸 들여 쓴다 ② 각주 [1] 은 한 치수 작게
+// ③ 소제목은 한 치수 크게 ④ 소제목과 바로 뒤 문단 사이는 빈 줄 없이 붙인다
+// 본문 텍스트에서 한 번, 복사용 HTML 에서 한 번 — 같은 규칙을 두 갈래로 적용한다.
+const NBSP = '\u00a0';                       // HTML 은 보통 공백이 접히므로 들여쓰기는 NBSP 로
+const REF_EM = '.85em';                      // 각주 [1] — 본문보다 한 치수 작게
+const H2_EM = '1.55em', H3_EM = '1.3em';     // 소제목 — 한 치수 크게
+const CAP_EM = '.92em';                      // 그림 캡션 — 본문보다 살짝 작게
+
+// 문장 끝(. ! ? …)에 닫는 따옴표·괄호·각주까지 붙여 한 덩어리로 본다.
+const SENT_END = /([.!?…])((?:["'”’»)\]]|\[\d{1,3}\])*)[ \t]+(?=\S)/g;
+
+// 문단 첫 글자와 문단 안 모든 문장의 첫 글자를 한 칸 들여 쓴다.
+// sp 는 ' '(마크다운·평문) 또는 NBSP(HTML).
+function indentSentences(text, sp) {
+  const t = String(text || '').replace(/^\s+/, '');
+  if (!t) return t;
+  return sp + t.replace(SENT_END, (m, end, tail, off, str) => {
+    // "3.5%" 는 뒤에 공백이 없어 애초에 안 걸린다. "2026. 8. 28." 처럼 숫자만 있는
+    // 토막 뒤의 마침표는 문장 끝이 아니라 날짜·항목 번호로 본다.
+    if (/(^|\s)\d{1,4}$/.test(str.slice(0, off))) return m;
+    if (/\d/.test(str[off - 1] || '') && /^\d/.test(str.slice(off + m.length))) return m;
+    return end + tail + sp + ' ';
+  });
+}
+
+// 마크다운 본문(복사·저장용)에 ①과 ④를 적용한다. 소제목·목록·표·인용·차트 줄은 건드리지 않는다.
+function formatBodyMd(md) {
+  const lines = String(md || '').replace(/\r\n?/g, '\n').split('\n');
+  const out = [];
+  let afterHead = false;
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/, '');
+    if (/^#{1,4}\s/.test(line)) { out.push(line); afterHead = true; continue; }
+    if (!line.trim()) { if (!afterHead) out.push(''); continue; }   // 소제목 바로 뒤 빈 줄은 버린다
+    afterHead = false;
+    const keep = /^\s*([-*+]|\d+[.)])\s/.test(line)     // 목록
+      || /^\s*[|>]/.test(line)                         // 표·인용
+      || /^\s*\[\[(viz|img):\d+\]\]\s*$/.test(line)    // 차트·그림 자리표시자
+      || /^\s*\[그림 \d+\]/.test(line)                 // 그림 자리(캡션 줄) — 들여쓰지 않는다
+      || /^\s*([-*_])\1{2,}\s*$/.test(line)            // 구분선
+      || /^\s*\*\*[^*]+\*\*\s*$/.test(line);           // 차트 제목 줄
+    out.push(keep ? line : indentSentences(line, ' '));
+  }
+  return out.join('\n');
+}
+
 // ── 마크다운 → HTML / 평문 ───────────────────────────────────
 // 외부 라이브러리 없이 필요한 만큼만: 제목·목록·인용·표·구분선·굵게·링크·인라인코드.
 
@@ -321,15 +368,26 @@ function inlineMd(s) {
     .replace(/\u0001/g, '<strong>').replace(/\u0002/g, '</strong>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,
-      (m, t, u) => `<a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a>`);
+      (m, t, u) => `<a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a>`)
+    // 각주 표시 — 대괄호까지 한 치수 작게. 링크 변환 뒤라서 [텍스트](url) 과 겹치지 않는다.
+    .replace(/\[(\d{1,3})\]/g, '<span class="ref">[$1]</span>');
 }
 
-function mdToHtml(md) {
+// 그림 자리 한 칸 — 붙여넣은 뒤 이 줄 위에 그림을 올리고, 줄은 그대로 캡션으로 쓰면 된다.
+function imgSlotLine(n, imgs) {
+  const g = (imgs || [])[n - 1] || {};
+  return `[그림 ${n}]${g.caption ? ' ' + g.caption : ''}`;
+}
+function imgSlotHtml(n, imgs) {
+  return `<p class="imgslot">${esc(imgSlotLine(n, imgs))}</p>`;
+}
+
+function mdToHtml(md, imgs) {
   const lines = String(md || '').replace(/\r\n?/g, '\n').split('\n');
   const out = [];
   let para = [], list = null, quote = [];
 
-  const flushPara = () => { if (para.length) { out.push(`<p>${inlineMd(para.join(' '))}</p>`); para = []; } };
+  const flushPara = () => { if (para.length) { out.push(`<p>${inlineMd(indentSentences(para.join(' '), NBSP))}</p>`); para = []; } };
   const flushList = () => { if (list) { out.push(`<${list.tag}>${list.items.map(i => `<li>${inlineMd(i)}</li>`).join('')}</${list.tag}>`); list = null; } };
   const flushQuote = () => { if (quote.length) { out.push(`<blockquote>${inlineMd(quote.join(' '))}</blockquote>`); quote = []; } };
   const flushAll = () => { flushPara(); flushList(); flushQuote(); };
@@ -368,6 +426,10 @@ function mdToHtml(md) {
 
     const bq = line.match(/^>\s?(.*)$/);
     if (bq) { flushPara(); flushList(); quote.push(bq[1]); continue; }
+
+    // [[img:1]] 자리표시자 — 사람이 직접 만들어 넣을 그림 자리. 캡션만 남기고 그림은 사람이 넣는다.
+    const im = line.match(/^\[\[img:(\d+)\]\]$/);
+    if (im) { flushAll(); out.push(imgSlotHtml(Number(im[1]), imgs)); continue; }
 
     // [[viz:1]] 자리표시자 — 여기에 차트를 그린다
     const vz = line.match(/^\[\[viz:(\d+)\]\]$/);
@@ -409,6 +471,19 @@ function resolveVizText(md, vizList) {
   const referenced = new Set((String(md || '').match(/\[\[viz:(\d+)\]\]/g) || [])
     .map(t => Number(t.replace(/\D/g, ''))));
   vizList.forEach((v, i) => { if (!referenced.has(i + 1)) s += `\n\n${vizToMd(v)}`; });
+  return s;
+}
+
+// 마크다운/평문 복사용: 그림 자리표시자를 "[그림 1] 캡션" 한 줄로 바꾼다.
+// Writer 가 자리표시자를 빠뜨린 그림은 버리지 않고 글 끝에 모아 둔다.
+function resolveImgText(md, imgs) {
+  const list = imgs || [];
+  const referenced = new Set((String(md || '').match(/\[\[img:(\d+)\]\]/g) || [])
+    .map(t => Number(t.replace(/\D/g, ''))));
+  // 줄 하나로 놓인 자리표시자가 원칙이지만, 문장 안에 섞여 들어와도 토큰이 새어 나가지 않게 한다
+  let s = String(md || '').replace(/\[\[img:(\d+)\]\]/g, (m, n) => imgSlotLine(Number(n), list));
+  const left = list.map((g, i) => i + 1).filter(n => !referenced.has(n));
+  if (left.length) s += '\n\n' + left.map(n => imgSlotLine(n, list)).join('\n');
   return s;
 }
 
@@ -646,7 +721,7 @@ function mdToPlain(md) {
     .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '$1 ($2)')
     .replace(/^([-*_])\1{2,}$/gm, '')
     .replace(/\n{3,}/g, '\n\n')
-    .trim();
+    .replace(/^\n+|\s+$/g, '');   // 앞쪽은 빈 줄만 걷어낸다 — 첫 문장의 들여쓰기 한 칸은 남긴다
 }
 
 // ── 초안 상태 ────────────────────────────────────────────────
@@ -952,7 +1027,7 @@ function chosenTitle() {
 function buildMarkdown() {
   const w = draft.stages.write || {};
   // 차트 자리표시자는 마크다운으로 옮길 수 없으니 데이터 표로 바꾼다
-  const body = resolveVizText((w.body_md || '').trim(), currentViz());
+  const body = formatBodyMd(resolveImgText(resolveVizText((w.body_md || '').trim(), currentViz()), w.images));
   const parts = [`# ${chosenTitle()}`, '', body];
   if ((w.footnotes || []).length) {
     parts.push('', '## 출처', '');
@@ -961,6 +1036,28 @@ function buildMarkdown() {
   if (w.disclaimer) parts.push('', '---', '', `> ${w.disclaimer}`);
   if (aiNotice()) parts.push('', '> 이 글은 AI의 도움을 받아 작성했으며, 사람이 사실관계를 검토했습니다.');
   return parts.join('\n');
+}
+
+// 본문 뒤에 붙는 꼬리말 — 출처·고지를 본문과 같은 레이아웃(.md 안)에 넣는다.
+// 화면 미리보기, 서식 복사, HTML 복사가 모두 이 조각을 함께 가져가서
+// 한 번 붙여넣으면 본문과 참조문헌이 같이 들어간다. 마크다운(buildMarkdown)과 같은 순서·표기.
+function articleTailHtml() {
+  const w = draft.stages.write || {};
+  const out = [];
+  const fns = w.footnotes || [];
+  if (fns.length) {
+    out.push('<h2>출처</h2>');
+    // URL 도 링크가 아니라 텍스트로 — 붙여넣는 편집기가 제멋대로 링크 서식을 입히지 않는다.
+    // 눌러서 확인하는 건 아래 “출처 확인용” 목록에서 한다.
+    out.push(fns.map(f => {
+      const line = [`[${f.n}]`, [f.outlet, f.title].filter(Boolean).join(' — '), f.url]
+        .filter(Boolean).join(' ');
+      return `<p class="ref-item">${esc(line)}</p>`;
+    }).join('\n'));
+  }
+  if (w.disclaimer) out.push('<hr />', `<blockquote>${esc(w.disclaimer)}</blockquote>`);
+  if (aiNotice()) out.push('<blockquote>이 글은 AI의 도움을 받아 작성했으며, 사람이 사실관계를 검토했습니다.</blockquote>');
+  return out.join('\n');
 }
 
 function copyText(text, btn) {
@@ -995,8 +1092,9 @@ function download(name, text) {
 function inlineArticleStyles(root) {
   const set = (sel, css) => root.querySelectorAll(sel).forEach(e => e.setAttribute('style', css));
   set('h1', 'font-size:1.9em;font-weight:800;margin:0 0 .6em;line-height:1.35;');
-  set('h2', 'font-size:1.4em;font-weight:800;margin:1.5em 0 .5em;line-height:1.4;');
-  set('h3', 'font-size:1.15em;font-weight:700;margin:1.2em 0 .4em;');
+  // 소제목은 한 치수 크게, 아래 여백은 0 — 바로 뒤 문단(margin-top:0)과 빈 줄 없이 붙는다
+  set('h2', `font-size:${H2_EM};font-weight:800;margin:1.5em 0 0;line-height:1.4;`);
+  set('h3', `font-size:${H3_EM};font-weight:700;margin:1.2em 0 0;`);
   set('p', 'margin:0 0 1em;line-height:1.9;');
   set('ul,ol', 'margin:0 0 1em;padding-left:1.5em;line-height:1.9;');
   set('li', 'margin:.25em 0;');
@@ -1007,6 +1105,32 @@ function inlineArticleStyles(root) {
   set('td', 'border:1px solid #d1d5db;padding:.45em .6em;text-align:left;');
   set('img', 'max-width:100%;height:auto;display:block;margin:1em auto;');
   set('hr', 'border:none;border-top:1px solid #e2e8f0;margin:1.5em 0;');
+  set('.ref', `font-size:${REF_EM};`);
+  // 출처 목록 — p 규칙 뒤에 덮어써서 줄간격을 좁히고 긴 URL 이 넘치지 않게 한다
+  set('.ref-item', `font-size:${REF_EM};margin:0 0 .4em;line-height:1.7;word-break:break-all;`);
+  // 그림 자리 — 붙여넣은 편집기에서 이 줄 위에 그림을 올리면 그대로 캡션이 된다
+  set('.imgslot', `font-size:${CAP_EM};color:#64748b;text-align:center;margin:1.2em 0;line-height:1.6;`);
+}
+
+// 클래스가 따라가지 않는 곳(워드프레스 등)에 붙여넣는 HTML 용 — 양식 규칙만 인라인으로 박는다.
+function inlineFormatStyles(root) {
+  const add = (sel, css) => root.querySelectorAll(sel).forEach(e =>
+    e.setAttribute('style', (e.getAttribute('style') || '') + css));
+  add('.ref', `font-size:${REF_EM};`);
+  add('.ref-item', `font-size:${REF_EM};line-height:1.7;word-break:break-all;`);
+  add('.imgslot', `font-size:${CAP_EM};color:#64748b;text-align:center;`);
+  add('h2', `font-size:${H2_EM};margin-bottom:0;`);
+  add('h3', `font-size:${H3_EM};margin-bottom:0;`);
+  add('h2 + p, h3 + p', 'margin-top:0;');
+}
+
+// HTML 복사용 — 버튼을 빼고 양식 규칙을 인라인으로 박아 문자열로 돌려준다
+function styledCopyHtml(html) {
+  const d = document.createElement('div');
+  d.innerHTML = html;
+  d.querySelectorAll('.viz-btns, button').forEach(b => b.remove());   // 복사본에 버튼은 넣지 않는다
+  inlineFormatStyles(d);
+  return d.innerHTML;
 }
 function buildRichHtml() {
   const srcMd = $('resultBody') && $('resultBody').querySelector('.md');
@@ -1071,7 +1195,8 @@ function renderResult() {
   const viz = currentViz();
   const skipped = ((draft.stages.visualize || {}).skipped || []);
   const md = buildMarkdown();
-  const html = injectViz(mdToHtml(w.body_md || ''), viz);
+  const html = (injectViz(mdToHtml(w.body_md || '', w.images), viz) + articleTailHtml())
+    .replace(/\[\[img:(\d+)\]\]/g, (m, n) => esc(imgSlotLine(Number(n), w.images)));   // 문장 안에 섞인 토큰 정리
 
   const srcRow = sourceStatus();
   const oor = (fc.out_of_range || []).length;
@@ -1097,10 +1222,8 @@ function renderResult() {
         <button class="mini" data-briefing="1" title="브리핑 앱의 '기사모음' 탭에 저장(같은 브라우저)">📌 브리핑에 저장</button>
       </div>
       <div class="md">${html}</div>
-      ${w.disclaimer ? `<div class="disclaimer">${esc(w.disclaimer)}</div>` : ''}
-      ${aiNotice() ? `<div class="disclaimer">이 글은 AI의 도움을 받아 작성했으며, 사람이 사실관계를 검토했습니다.</div>` : ''}
-      ${viz.length ? `<p class="tiny">그래프는 <b>PNG 저장</b>으로 내려서 블로그에 이미지로 올리는 게 가장 확실합니다.
-        마크다운·평문 복사에는 그래프가 <b>데이터 표</b>로 바뀌어 들어갑니다.</p>` : ''}
+      <p class="tiny">출처·고지는 본문과 한 덩어리라서, 복사하면 본문과 함께 붙습니다.
+        ${viz.length ? '그래프는 <b>PNG 저장</b>으로 내려서 블로그에 이미지로 올리는 게 가장 확실합니다. 마크다운·평문 복사에는 그래프가 <b>데이터 표</b>로 바뀌어 들어갑니다.' : ''}</p>
     </div>
 
     ${an ? `<div class="sec s-an">
@@ -1146,11 +1269,24 @@ function renderResult() {
         <ul class="bul tiny" style="padding-left:18px">${fc.unverified.map(u => `<li>${esc(u)}</li>`).join('')}</ul></div>` : ''}
     </div>
 
+    ${(w.images || []).length ? `<div class="sec s-src">
+      <h3>🖼 그림 만들기 ${(w.images || []).length}곳</h3>
+      <p class="tiny" style="margin:0 0 10px">본문 안 점선 칸이 그림 자리예요.
+        붙여넣은 뒤 그 줄 <b>위에</b> 직접 만든 그림을 올리면, 남은 줄이 그대로 캡션이 됩니다.</p>
+      <div class="srcs">${(w.images || []).map((g, i) => `
+        <div class="src">
+          <span class="t" style="color:var(--text)">[그림 ${esc(String(g.n || i + 1))}] ${esc(g.caption || '')}</span>
+          <span class="m">${esc(g.idea || '')}</span>
+        </div>`).join('')}</div>
+    </div>` : ''}
+
     <div class="sec s-src">
-      <h3>🔗 출처 ${(w.footnotes || []).length}건</h3>
+      <h3>🔗 출처 확인용 ${(w.footnotes || []).length}건</h3>
+      <p class="tiny" style="margin:0 0 10px">게시 전 링크를 하나씩 열어 확인하는 용도예요.
+        복사에는 이 목록이 아니라 <b>본문 끝 “출처”</b>가 함께 들어갑니다.</p>
       <div class="srcs">${(w.footnotes || []).map(f => `
         <a class="src" href="${esc(f.url || '#')}" target="_blank" rel="noopener noreferrer">
-          <span class="t">[${f.n}] ${esc(f.title || f.url || '')}</span>
+          <span class="t">[${esc(String(f.n))}] ${esc(f.title || f.url || '')}</span>
           <span class="m">${esc(f.outlet || '')} ↗</span>
         </a>`).join('') || '<div class="tiny">각주가 없습니다.</div>'}</div>
     </div>
@@ -1186,8 +1322,7 @@ function renderResult() {
       const k = b.dataset.copy;
       const text =
         k === 'md' ? md :
-        k === 'html' ? `<h1>${esc(chosenTitle())}</h1>\n` + injectViz(mdToHtml(w.body_md || ''), viz)
-          .replace(/<div class="viz-btns">[\s\S]*?<\/div>/g, '') :   // 복사본에 버튼은 넣지 않는다
+        k === 'html' ? `<h1>${esc(chosenTitle())}</h1>\n` + styledCopyHtml(html) :
         k === 'plain' ? chosenTitle() + '\n\n' + mdToPlain(md.replace(/^# .*\n/, '')) :
         k === 'seotitles' ? (seo.seo_titles || []).join('\n') :
         k === 'meta' ? (seo.meta_description || '') :
@@ -1472,7 +1607,9 @@ function renderInfo() {
         <li>기사 링크 · 원문 · 주제 중 하나를 넣고 옵션 6가지를 고른 뒤 <b>글 만들기</b>를 누릅니다.</li>
         <li>${STAGES.length}단계가 순서대로 돌아갑니다. 단계마다 결과가 저장되니, 마음에 안 드는 단계만
           <b>이 단계부터 다시</b>로 다시 돌릴 수 있어요(앞 단계 요금은 다시 안 나갑니다).</li>
-        <li>완성되면 📄 결과 탭에서 제목을 고르고 마크다운·HTML·평문으로 복사합니다.</li>
+        <li>완성되면 📄 결과 탭에서 제목을 고르고 마크다운·HTML·평문으로 복사합니다.
+          본문 안 점선 <b>[그림 N]</b> 칸이 그림 자리예요. 붙여넣은 뒤 그 줄 위에 직접 만든 그림을 올리면
+          남은 줄이 캡션이 됩니다. 어떤 그림을 만들지는 <b>🖼 그림 만들기</b> 목록에 적혀 있어요.</li>
       </ol>
       <p class="tiny"><b>알아 둘 한계</b> — 웹검색은 출처와 날짜를 강제하는 기능이 없습니다.
         출처·검색범위 옵션은 “우선순위 지시 + 결과 사후 검증”이라서 요청과 다를 수 있고,

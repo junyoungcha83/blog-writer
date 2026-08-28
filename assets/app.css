@@ -194,10 +194,21 @@ body {
 
 /* 마크다운 미리보기 */
 .md { font-size: .95rem; }
-.md h2 { font-size: 1.05rem; margin: 18px 0 8px; letter-spacing: -0.01em; }
+/* 소제목은 본문보다 한 치수 크게. 아래 여백 0 — 바로 뒤 문단과 빈 줄 없이 붙인다 */
+.md h2 { font-size: 1.16rem; margin: 18px 0 0; letter-spacing: -0.01em; }
 .md h2:first-child { margin-top: 0 }
-.md h3 { font-size: .97rem; margin: 14px 0 6px; }
+.md h3 { font-size: 1.07rem; margin: 14px 0 0; }
 .md p { margin: 0 0 10px; }
+/* 각주 표시 [1] — 대괄호까지 한 치수 작게 */
+.md .ref { font-size: .85em; }
+/* 본문 끝 출처 목록 — 본문과 같은 흐름 안에 두되 한 치수 작게 */
+.md .ref-item { font-size: .85em; margin: 0 0 4px; line-height: 1.7; word-break: break-all; }
+/* 그림 자리 — 미리보기에서는 점선 칸으로 눈에 띄게, 복사본에서는 캡션 한 줄로 나간다 */
+.md .imgslot {
+  font-size: .88rem; color: var(--muted); text-align: center; line-height: 1.6;
+  border: 1px dashed var(--border); border-radius: 10px;
+  background: var(--bg); padding: 14px 12px; margin: 12px 0;
+}
 .md ul, .md ol { margin: 0 0 10px; padding-left: 20px; }
 .md li { margin-bottom: 5px; }
 .md blockquote {
@@ -217,11 +228,6 @@ body {
 .md-table th, .md-table td { border: 1px solid var(--border); padding: 6px 9px; text-align: left; }
 .md-table th { background: var(--bg); font-weight: 800; white-space: nowrap; }
 .md-table td { font-variant-numeric: tabular-nums; }
-
-.disclaimer {
-  margin-top: 14px; padding: 10px 12px; border-radius: 10px;
-  background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412; font-size: .82rem;
-}
 
 /* 차트·표 (Visualization 단계 산출물) */
 .viz {

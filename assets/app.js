@@ -18,6 +18,7 @@ const K_USAGE = 'bw-usage';         // 사용량 기록 [{at, stage, model, cost
 const K_DRAFT = 'bw-draft';         // 작성 중인 초안 1개
 const K_HIST = 'bw-history';        // 완료된 글 이력
 const MAX_HIST = 20;
+const MAX_RETRIES = 2;              // 한 단계를 손으로 다시 돌릴 수 있는 횟수 상한(요금 폭주 방지)
 
 const STAGES = window.BW.STAGES;
 const { FIELDS, PURPOSES, LENGTHS, RANGES, SOURCE_TYPES, STYLES, TONES } = window.BW;
@@ -52,14 +53,17 @@ function blockModernTools(m) { const o = loadJSON(K_BASICTOOLS, {}); o[m] = true
 
 // 웹페이지 1장에서 가져올 최대 토큰. 기사 본문은 보통 2,000~6,000 토큰이다.
 const FETCH_MAX_TOKENS = 12000;
+const SEARCH_MAX_USES = 4;            // 한 단계에서 허용할 웹검색 횟수
 let fetchCapBlocked = false;          // 이 파라미터를 거부하는 모델이 있으면 한 번만 빼고 재시도
 
 function toolsFor(mode, model) {
   if (mode === 'none') return null;
   const modern = useModernTools(model);
+  // 검색 1회는 $0.01 이지만, 결과가 이번 턴에 쌓여 이어달리기 라운드마다 다시
+  // 전송되므로 실제 부담은 그보다 크다. 6→4 로 줄여 턴 자체를 가볍게 한다.
   const search = modern
-    ? { type: 'web_search_20260209', name: 'web_search', max_uses: 6 }
-    : { type: 'web_search_20250305', name: 'web_search', max_uses: 6 };
+    ? { type: 'web_search_20260209', name: 'web_search', max_uses: SEARCH_MAX_USES }
+    : { type: 'web_search_20250305', name: 'web_search', max_uses: SEARCH_MAX_USES };
   if (mode === 'search') return [search];
   // max_content_tokens 는 반드시 준다. 없으면 페이지를 통째로(본문 + 네비·광고·댓글·스크립트)
   // 가져와 한 장에 수만 토큰이 들어오고, pause_turn 으로 이어받을 때마다 그 내용을 다시 보내
@@ -100,7 +104,9 @@ const krw = n => '약 ' + Math.round(n * KRW_PER_USD).toLocaleString('ko-KR') + 
 
 function logUsage(stage, model, u) {
   const log = loadJSON(K_USAGE, []);
-  log.unshift({ at: Date.now(), stage, model, cost: costOf(model, u), in: u.in, out: u.out, searches: u.searches });
+  // cr/cw(캐시 읽기·쓰기)도 남긴다 — 캐싱이 실제로 먹는지 화면에서 확인해야 한다
+  log.unshift({ at: Date.now(), stage, model, cost: costOf(model, u),
+    in: u.in, out: u.out, searches: u.searches, cr: u.cacheRead || 0, cw: u.cacheWrite || 0 });
   saveJSON(K_USAGE, log.slice(0, 300));
 }
 // 이번 달(현지 기준) 1일 0시 — 비용과 호출 수가 같은 기준을 쓰도록 한 곳에서 만든다
@@ -130,7 +136,32 @@ function splitRuns(log) {
   return runs;
 }
 const lastRunLog = log => splitRuns(log)[0] || [];
-// 글 1편 평균 비용 — 위 묶음 그대로 센다(재실행·실패분 포함, 최근 10편).
+// 지금 돌리는 글에 든 비용 — 이 실행이 시작된 시각(draft.at) 이후 기록만 더한다.
+// 묶음(splitRuns) 추정과 달리 시작 시각을 알고 있으므로 정확하다.
+function runCostSince(since) {
+  if (!since) return { cost: 0, calls: 0, searches: 0 };
+  return loadJSON(K_USAGE, []).filter(e => e.at >= since).reduce(
+    (a, e) => ({ cost: a.cost + e.cost, calls: a.calls + 1, searches: a.searches + (e.searches || 0) }),
+    { cost: 0, calls: 0, searches: 0 });
+}
+// 이 단계를 한 번 돌리는 데 최근에 얼마가 들었는지 — 다시 시도할 때 얼마가 더 나갈지 알려준다
+function lastCostOfStage(key) {
+  const e = loadJSON(K_USAGE, []).find(x => x.stage === key);
+  return e ? e.cost : null;
+}
+// 실패·중단 시점의 과금 상태를 팝업에 넣을 줄로 만든다
+function costLines(extra) {
+  const run = runCostSince(draft.at);
+  const month = monthCost();
+  const lim = budget();
+  const lines = [
+    `<b>지금까지 이 글에 든 비용</b> — ${usd(run.cost)} (${krw(run.cost)}) · 호출 ${run.calls}회 · 검색 ${run.searches}회`,
+    `<b>이번 달 누적</b> — ${usd(month)} (${krw(month)})`
+      + (lim > 0 ? ` / 한도 ${usd(lim)} <b>(${Math.round(month / lim * 100)}%)</b>` : ' <small>(한도 없음)</small>'),
+  ];
+  if (extra) lines.push(extra);
+  return lines;
+}
 // 예전에는 seo 기록에서 무조건 STAGES 개수만큼 잘라 더해서, 단계를 건너뛰거나
 // 다시 돌린 글은 앞뒤 글의 요금이 섞여 들어가 실제와 다른 평균이 나왔다.
 function avgPerPost() {
@@ -148,6 +179,42 @@ class AppError extends Error {
   constructor(title, detail) { super(title); this.title = title; this.detail = detail || ''; }
 }
 
+// ── 프롬프트 캐싱 ────────────────────────────────────────────
+// 서버 도구를 쓰는 단계는 pause_turn 으로 여러 번 이어달리는데, 그때마다 지금까지
+// 모은 검색·본문 결과를 통째로 다시 보낸다. 캐싱하면 2라운드부터 그 앞부분을
+// 입력가의 0.1배로 읽는다(쓰기는 1.25배라, 한 번에 끝나는 단계에는 손해라 안 건다).
+// 실측에서 Researcher 한 단계가 글 1편 비용의 91% 였고 그 대부분이 이 재전송이다.
+const EPH = { type: 'ephemeral' };
+let cacheBlocked = false;          // 모델이 cache_control 을 거부하면 한 번만 끄고 재시도
+
+// cache_control 을 붙여도 되는 블록만 고른다. thinking 같은 블록에 붙이면 400 이 온다.
+const CACHEABLE_BLOCK = {
+  text: 1, image: 1, document: 1, tool_use: 1, tool_result: 1,
+  server_tool_use: 1, web_search_tool_result: 1, web_fetch_tool_result: 1,
+};
+function markLastCacheable(blocks) {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    if (!CACHEABLE_BLOCK[blocks[i].type]) continue;
+    const out = blocks.slice();
+    out[i] = Object.assign({}, blocks[i], { cache_control: EPH });
+    return out;
+  }
+  return blocks;
+}
+// 전송용 사본에만 표시를 단다. turn 원본에 넣으면 mergeTurn 의 블록 비교가 어긋나
+// 같은 내용을 이어붙여 본문과 요금이 함께 부풀어 오른다.
+function withCache(messages) {
+  return messages.map(m => {
+    if (m.role === 'user' && typeof m.content === 'string') {
+      return { role: 'user', content: [{ type: 'text', text: m.content, cache_control: EPH }] };
+    }
+    if (m.role === 'assistant' && Array.isArray(m.content)) {
+      return { role: 'assistant', content: markLastCacheable(m.content) };
+    }
+    return m;
+  });
+}
+
 async function callClaude({ system, userText, toolMode, maxTokens, model, stage, effort, maxContinuations = 4 }) {
   const key = getKey();
   if (!key) throw new AppError('API 키가 없어요', '오른쪽 위 ⚙︎ 에서 Anthropic API 키를 넣어 주세요.');
@@ -160,7 +227,13 @@ async function callClaude({ system, userText, toolMode, maxTokens, model, stage,
     let res;
     // 모델이 지원하지 않는 옵션이 있으면 400 이 온다. 그 옵션을 한 단계씩 내려가며 다시 보낸다.
     for (let attempt = 0; ; attempt++) {
-      const body = { model, max_tokens: maxTokens, system, messages };
+      // 이어달리기가 있는(=도구를 쓰는) 단계에서만 캐싱한다
+      const caching = !cacheBlocked && toolMode !== 'none';
+      const body = {
+        model, max_tokens: maxTokens,
+        system: caching ? [{ type: 'text', text: system, cache_control: EPH }] : system,
+        messages: caching ? withCache(messages) : messages,
+      };
       const tools = toolsFor(toolMode, model);
       if (tools) body.tools = tools;
       if (useEffort(model)) body.output_config = { effort };
@@ -169,6 +242,7 @@ async function callClaude({ system, userText, toolMode, maxTokens, model, stage,
       if (res.status !== 400 || attempt >= 3) break;
 
       const msg = await peekError(res);
+      if (/cache_control|cache/i.test(msg) && caching) { cacheBlocked = true; continue; }
       if (/max_content_tokens/i.test(msg) && !fetchCapBlocked) { fetchCapBlocked = true; continue; }
       if (/effort|output_config/i.test(msg) && body.output_config) { blockEffort(model); continue; }
       if (/programmatic tool calling|allowed_callers|web_search|web_fetch/i.test(msg) && useModernTools(model)) {
@@ -900,6 +974,7 @@ async function runFrom(startKey) {
   const from = STAGES.findIndex(s => s.key === startKey);
   if (from < 0) return;
   let restartFrom = null;   // '범위를 넓혀 다시' 를 고르면 여기에 단계 키가 들어온다
+  const retries = {};       // 단계별 재시도 횟수 — 실패를 무한히 되풀이하며 요금이 쌓이지 않게 막는다
 
   // 이 단계와 이후 단계 결과를 버린다
   STAGES.slice(from).forEach(st => {
@@ -971,10 +1046,15 @@ async function runFrom(startKey) {
         } else {
           lines.push('이대로 쓰면 내용이 얇거나 근거가 약한 글이 됩니다. 주제를 좁혀서 다시 해 보세요.');
         }
+        // 여기서 고르는 선택지마다 드는 돈이 다르다 — 지금 얼마나 썼는지 보고 정하게 한다.
+        // '넓혀 다시'는 ①부터 다시 도는 것이라 이 글에 든 비용이 거의 두 배가 된다.
+        lines.push(...costLines(w && w.key
+          ? '<b>범위를 넓혀 다시 하면</b> ① 자료수집부터 다시 돌아, 지금까지 든 만큼이 한 번 더 나갑니다.'
+          : null));
         buttons.push({ label: '이대로 계속 쓰기', value: 'go', ghost: !!w && !!w.key });
         buttons.push({ label: '여기서 멈추기', value: 'stop', ghost: true });
 
-        const choice = await askDialog({ icon: '🔍', title: '자료가 부족해요', lines, buttons });
+        const choice = await askDialog({ icon: '🔍', title: '자료가 부족해요 — 계속할까요?', lines, buttons });
 
         if (choice === 'widen') {
           draft.opts.range = w.key;
@@ -991,6 +1071,34 @@ async function runFrom(startKey) {
       const err = (e instanceof AppError) ? e : new AppError('문제가 생겼어요', e.message || '');
       draft.err[st.key] = { title: err.title, detail: err.detail };
       draft.status[st.key] = 'fail';
+      saveDraft(); renderStages();
+
+      // 실패한 그 순간의 과금 상태를 보여주고, 계속할지 직접 고르게 한다.
+      // 다시 시도하면 그 단계 요금이 한 번 더 나가므로 예상액을 함께 적는다.
+      const again = lastCostOfStage(st.key);
+      const tries = (retries[st.key] || 0);
+      const lines = [
+        `<b>${st.no} ${esc(st.label)}</b> 단계에서 멈췄어요 — ${esc(err.title)}`,
+        ...(err.detail ? [`<small>${esc(err.detail)}</small>`] : []),
+        ...costLines(again != null
+          ? `다시 시도하면 이 단계 요금이 한 번 더 나갑니다 — 최근 실측 <b>${usd(again)}</b> (${krw(again)}).`
+          : '다시 시도하면 이 단계 요금이 한 번 더 나갑니다.'),
+      ];
+      const buttons = [];
+      if (tries < MAX_RETRIES) buttons.push({ label: '이 단계 다시 시도', value: 'retry' });
+      else lines.push(`<small>이 단계를 이미 ${tries}번 다시 시도했어요. 계속 실패하면 입력이나 설정을 바꿔 보세요.</small>`);
+      buttons.push({ label: '여기서 멈추기', value: 'stop', ghost: buttons.length > 0 });
+
+      const choice = await askDialog({ icon: '⚠️', title: '문제가 생겼어요 — 계속할까요?', lines, buttons });
+
+      if (choice === 'retry') {
+        retries[st.key] = tries + 1;
+        delete draft.err[st.key];
+        draft.status[st.key] = 'wait';
+        saveDraft(); renderStages();
+        i--;                      // 같은 단계를 한 번 더
+        continue;
+      }
       STAGES.slice(i + 1).forEach(s => { draft.status[s.key] = 'stop'; });
       saveDraft(); renderStages();
       break;
@@ -1578,10 +1686,14 @@ function renderInfo() {
         const extraCost = extra.reduce((s, e) => s + e.cost, 0);
         const extraSearch = extra.reduce((s, e) => s + (e.searches || 0), 0);
 
+        // 캐시로 아낀 양 — 읽은 토큰은 정가의 0.1배로 계산됐으니 0.9배만큼이 절약분이다
+        const saved = done.reduce((s, r) =>
+          s + (r.last.cr || 0) / 1e6 * rateOf(r.last.model).in * 0.9, 0);
         const body = rows.map(({ st, last }) => kv(
           `${st.no} ${st.label}`,
           last
-            ? `${usd(last.cost)} <small>(${krw(last.cost)}) · 검색 ${last.searches || 0}회</small>`
+            ? `${usd(last.cost)} <small>(${krw(last.cost)}) · 검색 ${last.searches || 0}회`
+              + (last.cr ? ` · <b>캐시 ${Math.round(last.cr / 1000)}K</b>` : '') + '</small>'
             : '<small>안 돌림</small>'
         )).join('');
 
@@ -1593,7 +1705,13 @@ function renderInfo() {
                  `${usd(sum + extraCost)} <small>(${krw(sum + extraCost)}) · 검색 ${searches + extraSearch}회</small>`)
           : kvTotal('합계', `${usd(sum)} <small>(${krw(sum)}) · 검색 ${searches}회</small>`);
 
-        return body + tail + `<p class="tiny">${esc(runWhen(run))} 에 돌린 ${done.length}단계 기준입니다.
+        const cacheNote = saved > 0
+          ? `<p class="tiny">💾 <b>캐시로 아낀 돈 — ${usd(saved)} (${krw(saved)})</b>.
+              자료수집 단계는 이어달리기를 하며 같은 내용을 여러 번 다시 보내는데,
+              두 번째부터는 정가의 <b>10분의 1</b>로 읽습니다.</p>`
+          : `<p class="tiny">💾 아직 캐시가 걸린 기록이 없어요. 다음 글부터 자료수집 단계 옆에
+              <b>캐시 ○○K</b> 가 뜨면 제대로 먹고 있는 겁니다.</p>`;
+        return body + tail + cacheNote + `<p class="tiny">${esc(runWhen(run))} 에 돌린 ${done.length}단계 기준입니다.
           단계마다 가장 최근 1회를 더한 값이라, 그 글 1편에 든 비용에 가깝습니다.
           ${done.length < STAGES.length ? '안 돌린 단계(시각자료가 없으면 ④가 빠집니다)는 빠져 있습니다.' : ''}
           ${extra.length ? '다시 돌리거나 실패한 호출도 요금은 나가서 따로 더했습니다.' : ''}

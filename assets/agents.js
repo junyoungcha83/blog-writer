@@ -220,7 +220,7 @@ function factCheckerUser(research, input, opts) {
   return `${inputBlock(input)}
 
 Researcher 가 수집한 자료:
-${JSON.stringify(research, null, 2)}
+${JSON.stringify(research)}
 
 위 자료를 대조해 검증해라. JSON 만 출력.`;
 }
@@ -270,7 +270,7 @@ visualization_requests 는 **비워 두는 것이 기본값**이다. 위 조건�
 
 function analystUser(fc, opts) {
   return `검증된 자료:
-${JSON.stringify(fc, null, 2)}
+${JSON.stringify(fc)}
 
 위 자료로 논리를 세우고 시각자료 필요 여부를 판단해라. JSON 만 출력.`;
 }
@@ -327,10 +327,10 @@ function visualizationSystem(opts) {
 
 function visualizationUser(ctx) {
   return `Analyst 의 시각자료 요청:
-${JSON.stringify(ctx.stages.analyst.visualization_requests || [], null, 2)}
+${JSON.stringify(ctx.stages.analyst.visualization_requests || [])}
 
 쓸 수 있는 검증된 수치(facts):
-${JSON.stringify((ctx.stages.factcheck || {}).facts || [], null, 2)}
+${JSON.stringify((ctx.stages.factcheck || {}).facts || [])}
 
 이 수치만 써서 데이터를 만들어라. 조건을 만족하지 못하면 만들지 말고 skipped 에 적어라. JSON 만 출력.`;
 }
@@ -407,13 +407,13 @@ char_count 는 body_md 의 공백 포함 글자 수를 직접 세어 적는다.`
 function writerUser(ctx) {
   const viz = (ctx.stages.visualize || {}).visualizations || [];
   return `검증된 자료(facts·쟁점·의견):
-${JSON.stringify(ctx.stages.factcheck, null, 2)}
+${JSON.stringify(ctx.stages.factcheck)}
 
 분석 결과:
-${JSON.stringify(ctx.stages.analyst, null, 2)}
+${JSON.stringify(ctx.stages.analyst)}
 
 본문에 넣을 시각자료 ${viz.length}개${viz.length ? ' — 순서대로 [[viz:1]] … 로 참조' : ' (없음 — 자리표시자 넣지 말 것)'}:
-${JSON.stringify(viz.map((v, i) => ({ n: i + 1, type: v.type, title: v.title, unit: v.unit, note: v.note })), null, 2)}
+${JSON.stringify(viz.map((v, i) => ({ n: i + 1, type: v.type, title: v.title, unit: v.unit, note: v.note })))}
 
 위 자료만 써서 원고를 작성해라. JSON 만 출력.`;
 }
@@ -461,6 +461,9 @@ ${write.body_md}
 
 위 본문을 기준으로 SEO 세트를 만들어라. JSON 만 출력.`;
 }
+
+// 단계 간에 넘기는 JSON 은 들여쓰기 없이 보낸다 — 공백도 토큰으로 과금되고,
+// 실측에서 같은 내용이 21% 더 컸다. 모델은 압축 JSON 도 똑같이 읽는다.
 
 // ── 단계 정의 ─────────────────────────────────────────────────
 // tools: 'fetch+search' | 'search' | 'none'
